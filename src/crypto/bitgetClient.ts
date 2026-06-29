@@ -8,6 +8,18 @@ interface BitgetCandlesResponse {
 
 const BITGET_BASE_URL = "https://api.bitget.com";
 const ONE_MINUTE_MS = 60_000;
+const GRANULARITY_MS: Record<string, number> = {
+  "1m": 60_000,
+  "3m": 3 * 60_000,
+  "5m": 5 * 60_000,
+  "15m": 15 * 60_000,
+  "30m": 30 * 60_000,
+  "1H": 60 * 60_000,
+  "4H": 4 * 60 * 60_000,
+  "6H": 6 * 60 * 60_000,
+  "12H": 12 * 60 * 60_000,
+  "1D": 24 * 60 * 60_000
+};
 
 function toNumber(value: unknown): number {
   const parsed = Number(value);
@@ -25,6 +37,10 @@ export function parseBitgetCandle(row: string[]): ParsedKline {
   return { openTime, closeTime: openTime + ONE_MINUTE_MS - 1, open, high, low, close, volume, quoteVolume };
 }
 
+function intervalMsForGranularity(granularity: string): number {
+  return GRANULARITY_MS[granularity] ?? ONE_MINUTE_MS;
+}
+
 export async function fetchBitgetHistoryCandles(options: {
   symbol: string;
   productType: string;
@@ -34,15 +50,17 @@ export async function fetchBitgetHistoryCandles(options: {
   limit?: number;
 }): Promise<ParsedKline[]> {
   const limit = options.limit ?? 200;
+  const intervalMs = intervalMsForGranularity(options.granularity);
   const rows: ParsedKline[] = [];
   let cursorEnd = options.endTime;
 
   while (cursorEnd >= options.startTime) {
+    const requestStartTime = Math.max(options.startTime, cursorEnd - (limit - 1) * intervalMs);
     const url = new URL("/api/v2/mix/market/history-candles", BITGET_BASE_URL);
     url.searchParams.set("symbol", options.symbol);
     url.searchParams.set("productType", options.productType);
     url.searchParams.set("granularity", options.granularity);
-    url.searchParams.set("startTime", String(options.startTime));
+    url.searchParams.set("startTime", String(requestStartTime));
     url.searchParams.set("endTime", String(cursorEnd));
     url.searchParams.set("limit", String(limit));
 
