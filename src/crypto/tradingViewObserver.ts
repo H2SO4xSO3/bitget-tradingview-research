@@ -172,33 +172,34 @@ export function observeTradingViewSnapshot(options: {
     options.state.initialized = true;
   }
 
-  for (let index = 0; index < currentIndex; index += 1) {
-    const point = options.range[index];
-    const row = options.rows[index];
-    if (!point?.signal || options.state.processedConfirmedOpenTimes.has(row.openTime)) {
-      continue;
-    }
-    events.push({
-      ...eventBase(options.symbol, options.observedAt, row.openTime),
-      type: confirmedEventType(point.signal),
-      signal: point.signal,
-      direction: directionForSignal(point.signal),
-      price: row.close
-    });
-    options.state.processedConfirmedOpenTimes.add(row.openTime);
-    if (options.state.activePreview?.openTime === row.openTime && options.state.activePreview.signal !== point.signal) {
-      events.push({
-        ...eventBase(options.symbol, options.observedAt, row.openTime),
-        type: "false_preview",
-        signal: options.state.activePreview.signal,
-        direction: options.state.activePreview.direction,
-        entryPrice: options.state.activePreview.entryPrice,
-        reason: "closed_with_opposite_or_missing_signal"
-      });
-      options.state.activePreview = undefined;
-    }
-    if (options.state.activePreview?.openTime === row.openTime && options.state.activePreview.signal === point.signal) {
-      options.state.activePreview = undefined;
+  const lastClosedIndex = currentIndex - 1;
+  if (lastClosedIndex >= 0) {
+    const point = options.range[lastClosedIndex];
+    const row = options.rows[lastClosedIndex];
+    if (!options.state.processedConfirmedOpenTimes.has(row.openTime)) {
+      if (point?.signal) {
+        events.push({
+          ...eventBase(options.symbol, options.observedAt, row.openTime),
+          type: confirmedEventType(point.signal),
+          signal: point.signal,
+          direction: directionForSignal(point.signal),
+          price: row.close
+        });
+      }
+      options.state.processedConfirmedOpenTimes.add(row.openTime);
+      if (options.state.activePreview?.openTime === row.openTime) {
+        if (options.state.activePreview.signal !== point?.signal) {
+          events.push({
+            ...eventBase(options.symbol, options.observedAt, row.openTime),
+            type: "false_preview",
+            signal: options.state.activePreview.signal,
+            direction: options.state.activePreview.direction,
+            entryPrice: options.state.activePreview.entryPrice,
+            reason: "closed_with_opposite_or_missing_signal"
+          });
+        }
+        options.state.activePreview = undefined;
+      }
     }
   }
 

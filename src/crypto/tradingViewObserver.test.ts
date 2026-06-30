@@ -102,6 +102,37 @@ describe("TradingView observe-only state machine", () => {
     expect(result.events.map((event) => event.type)).toEqual(["confirmed_buy"]);
   });
 
+  it("does not backfill old confirmed labels if rolling indicator state changes later", () => {
+    const state = createTradingViewObserverState();
+    observeTradingViewSnapshot({
+      symbol: "MUUSDT",
+      rows: [row(0, 100), row(1, 101), row(2, 102)],
+      range: [rangePoint(0), rangePoint(1), rangePoint(2)],
+      frama: [framaPoint(0), framaPoint(1), framaPoint(2)],
+      state,
+      observedAt: 10_000
+    });
+    observeTradingViewSnapshot({
+      symbol: "MUUSDT",
+      rows: [row(0, 100), row(1, 101), row(2, 102), row(3, 103)],
+      range: [rangePoint(0), rangePoint(1), rangePoint(2), rangePoint(3)],
+      frama: [framaPoint(0), framaPoint(1), framaPoint(2), framaPoint(3)],
+      state,
+      observedAt: 70_000
+    });
+
+    const result = observeTradingViewSnapshot({
+      symbol: "MUUSDT",
+      rows: [row(0, 100), row(1, 101), row(2, 102), row(3, 103), row(4, 104)],
+      range: [rangePoint(0), rangePoint(1), rangePoint(2, "buy"), rangePoint(3), rangePoint(4)],
+      frama: [framaPoint(0), framaPoint(1), framaPoint(2), framaPoint(3), framaPoint(4)],
+      state,
+      observedAt: 130_000
+    });
+
+    expect(result.events).toEqual([]);
+  });
+
   it("records take-profit and stop-loss outcomes for active previews", () => {
     const state = createTradingViewObserverState();
     observeTradingViewSnapshot({
