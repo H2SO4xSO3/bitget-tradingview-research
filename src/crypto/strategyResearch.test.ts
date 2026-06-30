@@ -148,6 +148,37 @@ describe("fixed-risk strategy research helpers", () => {
     expect(allowed.trades[0]).toMatchObject({ direction: "long", entryPrice: 102 });
   });
 
+  it("can require same-direction WAE dead-zone break before fixed-risk pre-trigger entry", () => {
+    const rows = [
+      row(0, 100, 99, 101),
+      row(1, 102, 101.5, 103),
+      row(2, 106, 105, 106)
+    ];
+    const range = [rangePoint(0, 100, 102, 98), rangePoint(1, 101, 103, 99), rangePoint(2, 102, 104, 100)];
+    const frama = [framaPoint(0, 101, 106, 94), framaPoint(1, 101, 106, 96), framaPoint(2, 102, 106, 98)];
+    const deadZoneOnly: WaddahAttarExplosionPoint[] = [
+      { ...waePoint(0, "quiet"), trendUp: 10, trendDown: 0, explosionLine: 20, deadZone: 5 },
+      waePoint(1, "quiet"),
+      waePoint(2, "quiet")
+    ];
+
+    const result = runFixedRiskPreTriggerBacktest({
+      symbol: "MUUSDT",
+      rows,
+      range,
+      frama,
+      wae: deadZoneOnly,
+      waeGate: "withDeadZone",
+      initialEquityUsdt: 100,
+      riskFraction: 0.1,
+      maxLeverage: 25,
+      feeRate: 0
+    });
+
+    expect(result.trades).toHaveLength(1);
+    expect(result.trades[0]).toMatchObject({ direction: "long", entryPrice: 102 });
+  });
+
   it("can require WAE explosion columns to keep rising before entry", () => {
     const rows = [
       row(0, 100, 99, 101),

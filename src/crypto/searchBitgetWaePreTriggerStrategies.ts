@@ -82,7 +82,7 @@ const stopFilters = [
   { minStopPct: 0.004, maxStopPct: 0.04 }
 ];
 const colorGates = ["none", "withTrend"] as const;
-const waeGates = ["withExplosion", "withRisingExplosion"] as const;
+const waeGates = ["withDeadZone", "withExplosion", "withRisingExplosion"] as const;
 const dailyGates = [
   {},
   { dailyProfitTargetPct: 2, dailyLossLimitPct: 2 },

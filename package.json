@@ -11,6 +11,7 @@
     "observe-only": "tsx src/crypto/runBitgetObserveOnly.ts",
     "tradingview-backtest": "tsx src/crypto/runBitgetTradingViewBacktest.ts",
     "pretrigger-strategy-search": "tsx src/crypto/searchBitgetPreTriggerStrategies.ts",
+    "wae-ablation": "tsx src/crypto/runBitgetWaeAblation.ts",
     "wae-pretrigger-strategy-search": "tsx src/crypto/searchBitgetWaePreTriggerStrategies.ts",
     "strategy-search": "tsx src/crypto/searchBitgetStrategies.ts"
   },

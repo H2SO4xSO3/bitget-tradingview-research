@@ -78,7 +78,7 @@ export interface FixedRiskPreTriggerBacktestOptions {
   frama: readonly (FramaChannelPoint | undefined)[];
   wae?: readonly (WaddahAttarExplosionPoint | undefined)[];
   colorGate?: "none" | "withTrend";
-  waeGate?: "none" | "withExplosion" | "withRisingExplosion";
+  waeGate?: "none" | "withDeadZone" | "withExplosion" | "withRisingExplosion";
   initialEquityUsdt: number;
   riskFraction: number;
   maxLeverage: number;
@@ -125,6 +125,9 @@ function waeAllows(gate: FixedRiskPreTriggerBacktestOptions["waeGate"], point: W
   }
   if (!point) {
     return false;
+  }
+  if (gate === "withDeadZone") {
+    return direction === "long" ? point.trendUp > point.deadZone : point.trendDown > point.deadZone;
   }
   if (gate === "withRisingExplosion") {
     return direction === "long" ? point.bullishRising : point.bearishRising;
