@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  computeWaddahAttarExplosionSeries,
   computeRangeFilterSeries,
   runColorGatedSignalBacktest,
   runFlipSignalBacktest,
@@ -48,6 +49,23 @@ function framaPoint(index: number, frama: number, upper: number, lower: number):
 }
 
 describe("TradingView indicator backtest helpers", () => {
+  it("computes Waddah Attar Explosion direction and dead-zone breakouts", () => {
+    const rows = [100, 100.2, 100.7, 101.6, 103, 104.8, 103.2, 101.1, 98.8, 96.2].map((close, index) => row(index, close));
+
+    const points = computeWaddahAttarExplosionSeries(rows, {
+      sensitivity: 150,
+      fastLength: 1,
+      slowLength: 3,
+      channelLength: 2,
+      bbMultiplier: 0.1,
+      deadZoneLength: 2,
+      deadZoneMultiplier: 0.1
+    });
+
+    expect(points.some((point) => point.state === "bullish" && point.trendUp > point.deadZone && point.trendUp > (point.explosionLine ?? 0))).toBe(true);
+    expect(points.some((point) => point.state === "bearish" && point.trendDown > point.deadZone && point.trendDown > (point.explosionLine ?? 0))).toBe(true);
+  });
+
   it("emits Range Filter labels only when direction flips", () => {
     const rows = [100, 101, 102, 99, 98, 103, 104].map((close, index) => row(index, close));
 

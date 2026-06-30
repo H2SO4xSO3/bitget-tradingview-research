@@ -36,6 +36,32 @@ export interface RangeFilterPoint {
   signal?: TradingViewSignal;
 }
 
+export type WaddahAttarExplosionState = "bullish" | "bearish" | "quiet";
+
+export interface WaddahAttarExplosionOptions {
+  sensitivity: number;
+  fastLength: number;
+  slowLength: number;
+  channelLength: number;
+  bbMultiplier: number;
+  deadZoneLength?: number;
+  deadZoneMultiplier?: number;
+}
+
+export interface WaddahAttarExplosionPoint {
+  openTime: number;
+  macd?: number;
+  trendUp: number;
+  trendDown: number;
+  explosionLine?: number;
+  deadZone: number;
+  bullishExplosion: boolean;
+  bearishExplosion: boolean;
+  bullishRising: boolean;
+  bearishRising: boolean;
+  state: WaddahAttarExplosionState;
+}
+
 export interface FlipSignalTrade {
   symbol: string;
   direction: FlipDirection;
@@ -82,6 +108,82 @@ function emaSeries(values: number[], period: number): number[] {
     output.push(previous);
   }
   return output;
+}
+
+function rmaSeries(values: number[], period: number): Array<number | undefined> {
+  const output: Array<number | undefined> = [];
+  let previous: number | undefined;
+  for (let index = 0; index < values.length; index += 1) {
+    if (index < period - 1) {
+      output.push(undefined);
+      continue;
+    }
+    if (previous === undefined) {
+      previous = average(values.slice(index - period + 1, index + 1));
+    } else {
+      previous = (previous * (period - 1) + values[index]) / period;
+    }
+    output.push(previous);
+  }
+  return output;
+}
+
+function rollingStdev(values: number[], period: number): Array<number | undefined> {
+  const output: Array<number | undefined> = [];
+  for (let index = 0; index < values.length; index += 1) {
+    if (index < period - 1) {
+      output.push(undefined);
+      continue;
+    }
+    const window = values.slice(index - period + 1, index + 1);
+    const mean = average(window);
+    const variance = average(window.map((value) => (value - mean) ** 2));
+    output.push(Math.sqrt(variance));
+  }
+  return output;
+}
+
+function trueRangeSeries(rows: ParsedKline[]): number[] {
+  return rows.map((row, index) => {
+    const previousClose = rows[index - 1]?.close;
+    if (previousClose === undefined) {
+      return row.high - row.low;
+    }
+    return Math.max(row.high - row.low, Math.abs(row.high - previousClose), Math.abs(row.low - previousClose));
+  });
+}
+
+export function computeWaddahAttarExplosionSeries(rows: ParsedKline[], options: WaddahAttarExplosionOptions): WaddahAttarExplosionPoint[] {
+  const closes = rows.map((row) => row.close);
+  const fast = emaSeries(closes, options.fastLength);
+  const slow = emaSeries(closes, options.slowLength);
+  const macd = fast.map((value, index) => value - slow[index]);
+  const stdev = rollingStdev(closes, options.channelLength);
+  const deadZone = rmaSeries(trueRangeSeries(rows), options.deadZoneLength ?? 100).map((value) => (value ?? 0) * (options.deadZoneMultiplier ?? 3.7));
+
+  return rows.map((row, index) => {
+    const t1 = index === 0 ? 0 : (macd[index] - macd[index - 1]) * options.sensitivity;
+    const trendUp = t1 >= 0 ? t1 : 0;
+    const trendDown = t1 < 0 ? -t1 : 0;
+    const explosionLine = stdev[index] === undefined ? undefined : 2 * options.bbMultiplier * stdev[index];
+    const previousTrendUp = index > 0 ? Math.max((macd[index - 1] - (macd[index - 2] ?? macd[index - 1])) * options.sensitivity, 0) : 0;
+    const previousTrendDown = index > 0 ? Math.max(-((macd[index - 1] - (macd[index - 2] ?? macd[index - 1])) * options.sensitivity), 0) : 0;
+    const bullishExplosion = explosionLine !== undefined && trendUp > explosionLine && trendUp > deadZone[index];
+    const bearishExplosion = explosionLine !== undefined && trendDown > explosionLine && trendDown > deadZone[index];
+    return {
+      openTime: row.openTime,
+      macd: macd[index],
+      trendUp,
+      trendDown,
+      explosionLine,
+      deadZone: deadZone[index],
+      bullishExplosion,
+      bearishExplosion,
+      bullishRising: bullishExplosion && trendUp > previousTrendUp,
+      bearishRising: bearishExplosion && trendDown > previousTrendDown,
+      state: bullishExplosion ? "bullish" : bearishExplosion ? "bearish" : "quiet"
+    };
+  });
 }
 
 function highest(rows: ParsedKline[], start: number, endInclusive: number): number {

@@ -1,5 +1,5 @@
 import type { ParsedKline } from "./types";
-import type { FlipDirection, FramaCandleColor, FramaChannelPoint, RangeFilterPoint, TradingViewSignal } from "./tradingViewIndicators";
+import type { FlipDirection, FramaCandleColor, FramaChannelPoint, RangeFilterPoint, TradingViewSignal, WaddahAttarExplosionPoint } from "./tradingViewIndicators";
 
 export type ResearchExitReason = "take_profit" | "stop_loss" | "reverse" | "end" | "day_end" | "liquidation";
 
@@ -76,7 +76,9 @@ export interface FixedRiskPreTriggerBacktestOptions {
   rows: ParsedKline[];
   range: readonly (RangeFilterPoint | undefined)[];
   frama: readonly (FramaChannelPoint | undefined)[];
+  wae?: readonly (WaddahAttarExplosionPoint | undefined)[];
   colorGate?: "none" | "withTrend";
+  waeGate?: "none" | "withExplosion" | "withRisingExplosion";
   initialEquityUsdt: number;
   riskFraction: number;
   maxLeverage: number;
@@ -115,6 +117,19 @@ function colorAllows(colorGate: FixedRiskBacktestOptions["colorGate"], color: Fr
     return true;
   }
   return direction === "long" ? color === "up" : color === "down";
+}
+
+function waeAllows(gate: FixedRiskPreTriggerBacktestOptions["waeGate"], point: WaddahAttarExplosionPoint | undefined, direction: FlipDirection): boolean {
+  if (gate === undefined || gate === "none") {
+    return true;
+  }
+  if (!point) {
+    return false;
+  }
+  if (gate === "withRisingExplosion") {
+    return direction === "long" ? point.bullishRising : point.bearishRising;
+  }
+  return direction === "long" ? point.bullishExplosion : point.bearishExplosion;
 }
 
 function targetsForEntry(row: ParsedKline, direction: FlipDirection, options: FixedRiskBacktestOptions): { stop: number; takeProfit: number; stopPct: number } | undefined {
@@ -562,6 +577,9 @@ export function runFixedRiskPreTriggerBacktest(options: FixedRiskPreTriggerBackt
       continue;
     }
     if (!colorAllows(options.colorGate, previousFrama.candleColor, direction)) {
+      continue;
+    }
+    if (!waeAllows(options.waeGate, options.wae?.[index - 1], direction)) {
       continue;
     }
 
