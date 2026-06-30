@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { runFixedRiskSignalBacktest } from "./strategyResearch";
-import type { TradingViewSignal } from "./tradingViewIndicators";
+import { runFixedRiskPreTriggerBacktest, runFixedRiskSignalBacktest } from "./strategyResearch";
+import type { FramaChannelPoint, RangeFilterPoint, TradingViewSignal } from "./tradingViewIndicators";
 import type { ParsedKline } from "./types";
 
 function row(index: number, close: number, low = close - 1, high = close + 1): ParsedKline {
@@ -15,7 +15,85 @@ function row(index: number, close: number, low = close - 1, high = close + 1): P
   };
 }
 
+function rangePoint(index: number, filter: number, highBand: number, lowBand: number): RangeFilterPoint {
+  return {
+    openTime: index * 60_000,
+    filter,
+    highBand,
+    lowBand,
+    upward: 0,
+    downward: 0,
+    longCondition: false,
+    shortCondition: false
+  };
+}
+
+function framaPoint(index: number, frama: number, upper: number, lower: number, candleColor: FramaChannelPoint["candleColor"] = "neutral"): FramaChannelPoint {
+  return {
+    openTime: index * 60_000,
+    frama,
+    upper,
+    lower,
+    breakUp: false,
+    breakDown: false,
+    candleColor
+  };
+}
+
 describe("fixed-risk strategy research helpers", () => {
+  it("enters a fixed-risk pre-trigger trade from the previous Range band and exits at the tooltip target", () => {
+    const rows = [
+      row(0, 100, 99, 101),
+      row(1, 102, 101.5, 103),
+      row(2, 106, 105, 106)
+    ];
+    const range = [rangePoint(0, 100, 102, 98), rangePoint(1, 101, 103, 99), rangePoint(2, 102, 104, 100)];
+    const frama = [framaPoint(0, 101, 106, 94), framaPoint(1, 101, 106, 96), framaPoint(2, 102, 106, 98)];
+
+    const result = runFixedRiskPreTriggerBacktest({
+      symbol: "MUUSDT",
+      rows,
+      range,
+      frama,
+      initialEquityUsdt: 100,
+      riskFraction: 0.1,
+      maxLeverage: 25,
+      feeRate: 0
+    });
+
+    expect(result.trades).toHaveLength(1);
+    expect(result.trades[0]).toMatchObject({
+      direction: "long",
+      entryPrice: 102,
+      stopPrice: 101,
+      takeProfitPrice: 106,
+      riskUsdt: 10,
+      pnlUsdt: 40,
+      exitReason: "take_profit"
+    });
+    expect(result.endingEquityUsdt).toBe(140);
+  });
+
+  it("skips fixed-risk pre-trigger entries when both Range bands are touched in the same candle", () => {
+    const rows = [row(0, 100, 99, 101), row(1, 100, 97, 103)];
+    const range = [rangePoint(0, 100, 102, 98), rangePoint(1, 100, 102, 98)];
+    const frama = [framaPoint(0, 100, 106, 94), framaPoint(1, 100, 106, 94)];
+
+    const result = runFixedRiskPreTriggerBacktest({
+      symbol: "MUUSDT",
+      rows,
+      range,
+      frama,
+      initialEquityUsdt: 100,
+      riskFraction: 0.1,
+      maxLeverage: 25,
+      feeRate: 0
+    });
+
+    expect(result.trades).toHaveLength(0);
+    expect(result.endingEquityUsdt).toBe(100);
+  });
+
   it("sizes each trade from fixed account risk and exits at 1.5R take profit", () => {
     const rows = [
       row(0, 100, 98, 101),

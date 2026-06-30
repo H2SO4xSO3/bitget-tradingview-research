@@ -31,6 +31,7 @@ const leverage = numberFromEnv("BITGET_LEVERAGE", 25);
 const feeRate = numberFromEnv("BITGET_FEE_RATE", 0.0006);
 const maintenanceMarginRate = numberFromEnv("BITGET_MAINTENANCE_MARGIN_RATE", 0.005);
 const minTradeMarginUsdt = numberFromEnv("BITGET_MIN_TRADE_MARGIN_USDT", 1);
+const requestDelayMs = numberFromEnv("BITGET_REQUEST_DELAY_MS", 150);
 const maxHoldBars = numberFromEnv("BITGET_MAX_HOLD_BARS", 0);
 const usePreTrigger = process.env.BITGET_PRE_TRIGGER === "1";
 const preTriggerStopTrigger = process.env.BITGET_PRE_TRIGGER_STOP_TRIGGER === "close" ? "close" : "wick";
@@ -48,7 +49,8 @@ const rows = await fetchBitgetHistoryCandles({
   productType,
   granularity,
   startTime: warmupStartTime,
-  endTime
+  endTime,
+  requestDelayMs
 });
 const range = computeRangeFilterSeries(rows, { samplingPeriod: 100, rangeMultiplier: 3 });
 const frama = computeFramaChannelSeries(rows, { length: 26, bandsDistance: 1.5 });

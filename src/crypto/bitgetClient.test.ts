@@ -51,4 +51,88 @@ describe("Bitget candle client", () => {
       globalThis.fetch = originalFetch;
     }
   });
+
+  it("backs off and retries transient 429 candle responses", async () => {
+    const originalFetch = globalThis.fetch;
+    const sleeps: number[] = [];
+    let attempts = 0;
+    globalThis.fetch = (async () => {
+      attempts += 1;
+      if (attempts === 1) {
+        return {
+          ok: false,
+          status: 429,
+          json: async () => ({ code: "429", msg: "Too Many Requests" }),
+          text: async () => '{"code":"429","msg":"Too Many Requests"}'
+        } as Response;
+      }
+      return jsonResponse({
+        code: "00000",
+        msg: "success",
+        data: [["0", "100", "101", "99", "100", "1", "100"]]
+      }) as Response;
+    }) as typeof fetch;
+
+    try {
+      const rows = await fetchBitgetHistoryCandles({
+        symbol: "MUUSDT",
+        productType: "USDT-FUTURES",
+        granularity: "1m",
+        startTime: 0,
+        endTime: 0,
+        maxRetries: 2,
+        retryDelayMs: 250,
+        sleep: async (delayMs) => {
+          sleeps.push(delayMs);
+        }
+      });
+
+      expect(rows.map((row) => row.openTime)).toEqual([0]);
+      expect(attempts).toBe(2);
+      expect(sleeps).toEqual([250]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("waits between paginated candle requests when requested", async () => {
+    const originalFetch = globalThis.fetch;
+    const sleeps: number[] = [];
+    let calls = 0;
+    globalThis.fetch = (async (input: URL | string) => {
+      calls += 1;
+      const url = input instanceof URL ? input : new URL(String(input));
+      const startTime = Number(url.searchParams.get("startTime"));
+      const endTime = Number(url.searchParams.get("endTime"));
+      const data: string[][] = [];
+      for (let openTime = startTime; openTime <= endTime; openTime += 60_000) {
+        data.push([String(openTime), "100", "101", "99", "100", "1", "100"]);
+      }
+      return jsonResponse({
+        code: "00000",
+        msg: "success",
+        data
+      }) as Response;
+    }) as typeof fetch;
+
+    try {
+      await fetchBitgetHistoryCandles({
+        symbol: "MUUSDT",
+        productType: "USDT-FUTURES",
+        granularity: "1m",
+        startTime: 0,
+        endTime: 180_000,
+        limit: 2,
+        requestDelayMs: 33,
+        sleep: async (delayMs) => {
+          sleeps.push(delayMs);
+        }
+      });
+
+      expect(calls).toBe(2);
+      expect(sleeps).toEqual([33]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
 });

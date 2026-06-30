@@ -21,6 +21,8 @@ const GRANULARITY_MS: Record<string, number> = {
   "1D": 24 * 60 * 60_000
 };
 
+type SleepFn = (delayMs: number) => Promise<void>;
+
 function toNumber(value: unknown): number {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : 0;
@@ -41,6 +43,26 @@ function intervalMsForGranularity(granularity: string): number {
   return GRANULARITY_MS[granularity] ?? ONE_MINUTE_MS;
 }
 
+function sleep(delayMs: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, delayMs);
+  });
+}
+
+function retryDelay(baseDelayMs: number, attempt: number): number {
+  return baseDelayMs * 2 ** attempt;
+}
+
+async function fetchWithRetry(url: URL, options: { maxRetries: number; retryDelayMs: number; sleep: SleepFn }): Promise<Response> {
+  for (let attempt = 0; ; attempt += 1) {
+    const response = await fetch(url);
+    if (response.ok || response.status !== 429 || attempt >= options.maxRetries) {
+      return response;
+    }
+    await options.sleep(retryDelay(options.retryDelayMs, attempt));
+  }
+}
+
 export async function fetchBitgetHistoryCandles(options: {
   symbol: string;
   productType: string;
@@ -48,9 +70,15 @@ export async function fetchBitgetHistoryCandles(options: {
   startTime: number;
   endTime: number;
   limit?: number;
+  requestDelayMs?: number;
+  maxRetries?: number;
+  retryDelayMs?: number;
+  sleep?: SleepFn;
 }): Promise<ParsedKline[]> {
   const limit = options.limit ?? 200;
   const intervalMs = intervalMsForGranularity(options.granularity);
+  const requestDelayMs = options.requestDelayMs ?? 0;
+  const sleepFn = options.sleep ?? sleep;
   const rows: ParsedKline[] = [];
   let cursorEnd = options.endTime;
 
@@ -64,7 +92,11 @@ export async function fetchBitgetHistoryCandles(options: {
     url.searchParams.set("endTime", String(cursorEnd));
     url.searchParams.set("limit", String(limit));
 
-    const response = await fetch(url);
+    const response = await fetchWithRetry(url, {
+      maxRetries: options.maxRetries ?? 5,
+      retryDelayMs: options.retryDelayMs ?? 1_000,
+      sleep: sleepFn
+    });
     if (!response.ok) {
       throw new Error(`Bitget candles HTTP ${response.status}: ${await response.text()}`);
     }
@@ -83,6 +115,9 @@ export async function fetchBitgetHistoryCandles(options: {
       break;
     }
     cursorEnd = nextCursorEnd;
+    if (requestDelayMs > 0 && cursorEnd >= options.startTime) {
+      await sleepFn(requestDelayMs);
+    }
   }
 
   const seen = new Set<number>();

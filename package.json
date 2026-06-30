@@ -9,6 +9,7 @@
     "bitget-volume-research": "tsx src/crypto/runBitgetVolumeResearch.ts",
     "bitget-volume-collect": "tsx src/crypto/runBitgetVolumeCollector.ts",
     "tradingview-backtest": "tsx src/crypto/runBitgetTradingViewBacktest.ts",
+    "pretrigger-strategy-search": "tsx src/crypto/searchBitgetPreTriggerStrategies.ts",
     "strategy-search": "tsx src/crypto/searchBitgetStrategies.ts"
   },
   "devDependencies": {

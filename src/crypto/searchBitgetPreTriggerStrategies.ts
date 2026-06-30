@@ -2,7 +2,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fetchBitgetHistoryCandles } from "./bitgetClient";
 import { computeFramaChannelSeries, computeRangeFilterSeries } from "./tradingViewIndicators";
-import { runFixedRiskSignalBacktest, type FixedRiskBacktestResult } from "./strategyResearch";
+import { runFixedRiskPreTriggerBacktest, type FixedRiskBacktestResult } from "./strategyResearch";
 
 function numberFromEnv(name: string, fallback: number): number {
   const parsed = Number(process.env[name]);
@@ -41,7 +41,7 @@ interface CandidateSummary {
 const symbol = process.env.BITGET_SYMBOL ?? "MUUSDT";
 const productType = process.env.BITGET_PRODUCT_TYPE ?? "USDT-FUTURES";
 const granularity = process.env.BITGET_GRANULARITY ?? "1m";
-const days = numberFromEnv("BITGET_BACKTEST_DAYS", 14);
+const days = numberFromEnv("BITGET_BACKTEST_DAYS", 365);
 const warmupDays = numberFromEnv("BITGET_WARMUP_DAYS", 3);
 const initialEquityUsdt = numberFromEnv("BITGET_INITIAL_EQUITY_USDT", 100);
 const feeRate = numberFromEnv("BITGET_FEE_RATE", 0.0006);
@@ -49,7 +49,7 @@ const requestDelayMs = numberFromEnv("BITGET_REQUEST_DELAY_MS", 150);
 const endTime = timeFromEnv("BITGET_BACKTEST_END_TIME") ?? Date.now();
 const startTime = timeFromEnv("BITGET_BACKTEST_START_TIME") ?? endTime - days * 24 * 60 * 60 * 1000;
 const warmupStartTime = startTime - warmupDays * 24 * 60 * 60 * 1000;
-const outputPath = process.env.BITGET_STRATEGY_SEARCH_PATH ?? "data/bitget-muusdt-strategy-search.json";
+const outputPath = process.env.BITGET_PRETRIGGER_SEARCH_PATH ?? "data/bitget-muusdt-pretrigger-fixed-risk-search.json";
 
 const rows = await fetchBitgetHistoryCandles({
   symbol,
@@ -60,48 +60,43 @@ const rows = await fetchBitgetHistoryCandles({
   requestDelayMs
 });
 
-const frama = computeFramaChannelSeries(rows, { length: 26, bandsDistance: 1.5 });
-const framaColors = frama.map((point) => point.candleColor);
-
-const rangePeriods = [75, 100, 125];
-const rangeMultipliers = [2, 2.5, 3];
-const riskRewardRatios = [1, 1.5, 2];
-const riskFractions = [0.02, 0.05];
-const cooldownBars = [0, 5];
-const maxLeverages = [25];
-const percentStops = [0.004, 0.008];
-const wickFilters = [
-  { minStopPct: 0.002, maxStopPct: 0.02 },
-  { minStopPct: 0.003, maxStopPct: 0.03 }
+const rangePeriods = [50, 75, 100, 125];
+const rangeMultipliers = [2, 2.5, 3, 3.5];
+const riskFractions = [0.005, 0.01, 0.02];
+const cooldownBars = [0, 5, 15];
+const maxLeverages = [10, 25];
+const stopFilters = [
+  { minStopPct: 0.0015, maxStopPct: 0.02 },
+  { minStopPct: 0.0025, maxStopPct: 0.03 },
+  { minStopPct: 0.004, maxStopPct: 0.04 }
 ];
 const colorGates = ["none", "withTrend"] as const;
-const signalModes = ["normal", "inverse"] as const;
-
-function signalsForMode(signals: ReturnType<typeof computeRangeFilterSeries>[number]["signal"][], mode: (typeof signalModes)[number]) {
-  if (mode === "normal") {
-    return signals;
-  }
-  return signals.map((signal) => (signal === "buy" ? "sell" : signal === "sell" ? "buy" : undefined));
-}
+const dailyGates = [
+  {},
+  { dailyProfitTargetPct: 2, dailyLossLimitPct: 2 },
+  { dailyProfitTargetPct: 3, dailyLossLimitPct: 2 }
+];
 
 function scoreResult(result: FixedRiskBacktestResult): number {
-  const tradePenalty = result.trades.length < 20 ? 50 : 0;
+  const tradePenalty = result.trades.length < 30 ? 75 : 0;
+  const instabilityPenalty = result.minDailyReturnPct < -5 ? Math.abs(result.minDailyReturnPct + 5) * 6 : 0;
   return (
-    result.avgDailyReturnPct * 5 +
-    result.minDailyReturnPct * 4 +
-    result.profitFactor * 10 -
-    result.maxDrawdownPct * 0.75 -
-    tradePenalty
+    result.avgDailyReturnPct * 8 +
+    result.minDailyReturnPct * 3 +
+    result.profitFactor * 15 -
+    result.maxDrawdownPct * 0.6 -
+    tradePenalty -
+    instabilityPenalty
   );
 }
 
 function summarize(config: Record<string, unknown>, result: FixedRiskBacktestResult): Omit<CandidateSummary, "rank"> {
   const meetsTarget =
-    result.avgDailyReturnPct >= 5 &&
-    result.minDailyReturnPct >= 0 &&
-    result.trades.length >= 20 &&
-    result.maxDrawdownPct <= 50 &&
-    result.profitFactor >= 1.2;
+    result.avgDailyReturnPct >= 2 &&
+    result.minDailyReturnPct >= -2 &&
+    result.trades.length >= 30 &&
+    result.maxDrawdownPct <= 35 &&
+    result.profitFactor >= 1.15;
   return {
     score: scoreResult(result),
     meetsTarget,
@@ -139,59 +134,43 @@ function keepCandidate(candidate: Omit<CandidateSummary, "rank">): void {
 for (const samplingPeriod of rangePeriods) {
   for (const rangeMultiplier of rangeMultipliers) {
     const range = computeRangeFilterSeries(rows, { samplingPeriod, rangeMultiplier });
-    const rawSignals = range.map((point) => point.signal);
-    for (const signalMode of signalModes) {
-      const signals = signalsForMode(rawSignals, signalMode);
-      for (const riskRewardRatio of riskRewardRatios) {
-        for (const riskFraction of riskFractions) {
-          for (const cooldown of cooldownBars) {
-            for (const maxLeverage of maxLeverages) {
-              for (const colorGate of colorGates) {
-                for (const stopPct of percentStops) {
-                  tested += 1;
-                  const config = { samplingPeriod, rangeMultiplier, signalMode, stopMode: "percent", stopPct, riskRewardRatio, riskFraction, cooldown, maxLeverage, colorGate };
-                  const result = runFixedRiskSignalBacktest({
-                    symbol,
-                    rows,
-                    signals,
-                    framaColors: colorGate === "withTrend" ? framaColors : undefined,
-                    colorGate,
-                    initialEquityUsdt,
-                    riskFraction,
-                    riskRewardRatio,
-                    maxLeverage,
-                    feeRate,
-                    tradeStartTime: startTime,
-                    stopMode: "percent",
-                    stopPct,
-                    cooldownBars: cooldown,
-                    allowReverse: true
-                  });
-                  keepCandidate(summarize(config, result));
-                }
-                for (const filter of wickFilters) {
-                  tested += 1;
-                  const config = { samplingPeriod, rangeMultiplier, signalMode, stopMode: "wick", ...filter, riskRewardRatio, riskFraction, cooldown, maxLeverage, colorGate };
-                  const result = runFixedRiskSignalBacktest({
-                    symbol,
-                    rows,
-                    signals,
-                    framaColors: colorGate === "withTrend" ? framaColors : undefined,
-                    colorGate,
-                    initialEquityUsdt,
-                    riskFraction,
-                    riskRewardRatio,
-                    maxLeverage,
-                    feeRate,
-                    tradeStartTime: startTime,
-                    stopMode: "wick",
-                    minStopPct: filter.minStopPct,
-                    maxStopPct: filter.maxStopPct,
-                    cooldownBars: cooldown,
-                    allowReverse: true
-                  });
-                  keepCandidate(summarize(config, result));
-                }
+    const frama = computeFramaChannelSeries(rows, { length: 26, bandsDistance: 1.5 });
+    for (const riskFraction of riskFractions) {
+      for (const cooldown of cooldownBars) {
+        for (const maxLeverage of maxLeverages) {
+          for (const colorGate of colorGates) {
+            for (const stopFilter of stopFilters) {
+              for (const dailyGate of dailyGates) {
+                tested += 1;
+                const config = {
+                  entryMode: "preTriggerTooltip",
+                  samplingPeriod,
+                  rangeMultiplier,
+                  riskFraction,
+                  cooldown,
+                  maxLeverage,
+                  colorGate,
+                  ...stopFilter,
+                  ...dailyGate
+                };
+                const result = runFixedRiskPreTriggerBacktest({
+                  symbol,
+                  rows,
+                  range,
+                  frama,
+                  colorGate,
+                  initialEquityUsdt,
+                  riskFraction,
+                  maxLeverage,
+                  feeRate,
+                  tradeStartTime: startTime,
+                  minStopPct: stopFilter.minStopPct,
+                  maxStopPct: stopFilter.maxStopPct,
+                  cooldownBars: cooldown,
+                  maintenanceMarginRate: 0.005,
+                  ...dailyGate
+                });
+                keepCandidate(summarize(config, result));
               }
             }
           }
@@ -219,12 +198,18 @@ const report = {
   sourceCandles: rows.length,
   tradingCandles: rows.filter((row) => row.openTime >= startTime).length,
   tested,
+  strategy: {
+    entryMode: "preTriggerTooltip",
+    entryRule: "Touch previous Range Filter high/low band before the confirmed label; skip same-bar double touches and same-side repeats.",
+    exitRule: "Use the clean Pine tooltip style Range/FRAMA stop and take-profit levels; stop is conservative when stop and target touch in the same candle.",
+    sizing: "Fixed fraction of equity at risk per trade, capped by max leverage."
+  },
   target: {
-    avgDailyReturnPctGte: 5,
-    minDailyReturnPctGte: 0,
-    maxDrawdownPctLte: 50,
-    minTrades: 20,
-    profitFactorGte: 1.2
+    avgDailyReturnPctGte: 2,
+    minDailyReturnPctGte: -2,
+    maxDrawdownPctLte: 35,
+    minTrades: 30,
+    profitFactorGte: 1.15
   },
   best: ranked[0],
   matches,

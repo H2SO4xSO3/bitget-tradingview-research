@@ -1,5 +1,5 @@
 import type { ParsedKline } from "./types";
-import type { FlipDirection, FramaCandleColor, TradingViewSignal } from "./tradingViewIndicators";
+import type { FlipDirection, FramaCandleColor, FramaChannelPoint, RangeFilterPoint, TradingViewSignal } from "./tradingViewIndicators";
 
 export type ResearchExitReason = "take_profit" | "stop_loss" | "reverse" | "end" | "day_end" | "liquidation";
 
@@ -71,6 +71,26 @@ export interface FixedRiskBacktestOptions {
   forceFlatAtDayEnd?: boolean;
 }
 
+export interface FixedRiskPreTriggerBacktestOptions {
+  symbol: string;
+  rows: ParsedKline[];
+  range: readonly (RangeFilterPoint | undefined)[];
+  frama: readonly (FramaChannelPoint | undefined)[];
+  colorGate?: "none" | "withTrend";
+  initialEquityUsdt: number;
+  riskFraction: number;
+  maxLeverage: number;
+  feeRate: number;
+  tradeStartTime?: number;
+  minStopPct?: number;
+  maxStopPct?: number;
+  cooldownBars?: number;
+  maintenanceMarginRate?: number;
+  dailyProfitTargetPct?: number;
+  dailyLossLimitPct?: number;
+  forceFlatAtDayEnd?: boolean;
+}
+
 const SHANGHAI_OFFSET_MS = 8 * 60 * 60 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
 const dayKeyCache = new Map<number, string>();
@@ -121,6 +141,60 @@ function targetsForEntry(row: ParsedKline, direction: FlipDirection, options: Fi
     direction === "long"
       ? row.close + riskPerUnit * options.riskRewardRatio
       : row.close - riskPerUnit * options.riskRewardRatio;
+  return { stop, takeProfit, stopPct };
+}
+
+function maxDefined(values: Array<number | undefined>): number | undefined {
+  const defined = values.filter((value): value is number => value !== undefined);
+  return defined.length > 0 ? Math.max(...defined) : undefined;
+}
+
+function minDefined(values: Array<number | undefined>): number | undefined {
+  const defined = values.filter((value): value is number => value !== undefined);
+  return defined.length > 0 ? Math.min(...defined) : undefined;
+}
+
+function lineBelowEntry(entryPrice: number, values: Array<number | undefined>, fallback: number): number {
+  return maxDefined(values.filter((value): value is number => value !== undefined && value < entryPrice)) ?? fallback;
+}
+
+function lineAboveEntry(entryPrice: number, values: Array<number | undefined>, fallback: number): number {
+  return minDefined(values.filter((value): value is number => value !== undefined && value > entryPrice)) ?? fallback;
+}
+
+function targetsForPreTriggerEntry(
+  entryPrice: number,
+  direction: FlipDirection,
+  range: RangeFilterPoint,
+  frama: FramaChannelPoint,
+  options: FixedRiskPreTriggerBacktestOptions
+): { stop: number; takeProfit: number; stopPct: number } | undefined {
+  const stop =
+    direction === "long"
+      ? lineBelowEntry(entryPrice, [range.filter, frama.frama], range.lowBand)
+      : lineAboveEntry(entryPrice, [range.filter, frama.frama], range.highBand);
+  const rangeWidth =
+    direction === "long" ? Math.max(0, range.highBand - range.filter) : Math.max(0, range.filter - range.lowBand);
+  const rangeTarget = direction === "long" ? entryPrice + rangeWidth : entryPrice - rangeWidth;
+  const takeProfit =
+    direction === "long"
+      ? frama.upper !== undefined && frama.upper > rangeTarget
+        ? frama.upper
+        : rangeTarget
+      : frama.lower !== undefined && frama.lower < rangeTarget
+        ? frama.lower
+        : rangeTarget;
+  const riskPerUnit = Math.abs(entryPrice - stop);
+  if (riskPerUnit <= 0) {
+    return undefined;
+  }
+  const stopPct = riskPerUnit / entryPrice;
+  if (options.minStopPct !== undefined && stopPct < options.minStopPct) {
+    return undefined;
+  }
+  if (options.maxStopPct !== undefined && stopPct > options.maxStopPct) {
+    return undefined;
+  }
   return { stop, takeProfit, stopPct };
 }
 
@@ -298,6 +372,220 @@ export function runFixedRiskSignalBacktest(options: FixedRiskBacktestOptions): F
       takeProfitPrice: targets.takeProfit,
       riskUsdt: riskPerUnit * quantity,
       notionalUsdt: row.close * quantity,
+      quantity
+    };
+  }
+
+  const last = options.rows.at(-1);
+  if (position && last) {
+    const preview = closeFixedRiskTrade(options.symbol, position, last, last.close, options.feeRate, "end", equity);
+    equity += preview.pnlUsdt;
+    trades.push({ ...preview, equityAfterUsdt: equity });
+  }
+
+  const wins = trades.filter((trade) => trade.pnlUsdt > 0);
+  const losses = trades.filter((trade) => trade.pnlUsdt < 0);
+  const winSum = wins.reduce((sum, trade) => sum + trade.pnlUsdt, 0);
+  const lossSum = Math.abs(losses.reduce((sum, trade) => sum + trade.pnlUsdt, 0));
+  const netPnlUsdt = trades.reduce((sum, trade) => sum + trade.pnlUsdt, 0);
+
+  let curveEquity = options.initialEquityUsdt;
+  let peak = curveEquity;
+  let maxDrawdownUsdt = 0;
+  for (const trade of trades) {
+    curveEquity += trade.pnlUsdt;
+    peak = Math.max(peak, curveEquity);
+    maxDrawdownUsdt = Math.max(maxDrawdownUsdt, peak - curveEquity);
+  }
+
+  const dailyMap = new Map<string, DailyResult>();
+  let previousDaily: DailyResult | undefined;
+  for (const row of options.rows) {
+    if (options.tradeStartTime !== undefined && row.openTime < options.tradeStartTime) {
+      continue;
+    }
+    const key = dayKey(row.openTime);
+    if (!dailyMap.has(key)) {
+      const startEquityUsdt = previousDaily?.endEquityUsdt ?? options.initialEquityUsdt;
+      previousDaily = { day: key, startEquityUsdt, endEquityUsdt: startEquityUsdt, pnlUsdt: 0, returnPct: 0, trades: 0 };
+      dailyMap.set(key, previousDaily);
+    }
+  }
+  for (const trade of trades) {
+    const key = dayKey(Date.parse(trade.exitTime));
+    const daily = dailyMap.get(key);
+    if (!daily) {
+      continue;
+    }
+    daily.pnlUsdt += trade.pnlUsdt;
+    daily.endEquityUsdt += trade.pnlUsdt;
+    daily.trades += 1;
+  }
+  let previousEnd = options.initialEquityUsdt;
+  for (const daily of dailyMap.values()) {
+    daily.startEquityUsdt = previousEnd;
+    daily.endEquityUsdt = previousEnd + daily.pnlUsdt;
+    daily.returnPct = daily.startEquityUsdt > 0 ? (daily.pnlUsdt / daily.startEquityUsdt) * 100 : 0;
+    previousEnd = daily.endEquityUsdt;
+  }
+  const daily = Array.from(dailyMap.values());
+  const avgDailyReturnPct = daily.length > 0 ? daily.reduce((sum, value) => sum + value.returnPct, 0) / daily.length : 0;
+  const minDailyReturnPct = daily.length > 0 ? Math.min(...daily.map((value) => value.returnPct)) : 0;
+
+  return {
+    symbol: options.symbol,
+    candles: tradingCandles,
+    trades,
+    netPnlUsdt,
+    endingEquityUsdt: equity,
+    returnPct: options.initialEquityUsdt > 0 ? (netPnlUsdt / options.initialEquityUsdt) * 100 : 0,
+    winRate: trades.length > 0 ? wins.length / trades.length : 0,
+    profitFactor: lossSum > 0 ? winSum / lossSum : wins.length > 0 ? 999 : 0,
+    maxDrawdownPct: options.initialEquityUsdt > 0 ? (maxDrawdownUsdt / options.initialEquityUsdt) * 100 : 0,
+    maxDrawdownUsdt,
+    daily,
+    avgDailyReturnPct,
+    minDailyReturnPct
+  };
+}
+
+export function runFixedRiskPreTriggerBacktest(options: FixedRiskPreTriggerBacktestOptions): FixedRiskBacktestResult {
+  const trades: FixedRiskTrade[] = [];
+  let equity = options.initialEquityUsdt;
+  let position:
+    | {
+        direction: FlipDirection;
+        entryRow: ParsedKline;
+        stopPrice: number;
+        takeProfitPrice: number;
+        riskUsdt: number;
+        notionalUsdt: number;
+        quantity: number;
+      }
+    | undefined;
+  let tradingCandles = 0;
+  let cooldownUntil = -1;
+  let currentDay: string | undefined;
+  let dayStartEquity = options.initialEquityUsdt;
+  let dayPnl = 0;
+  let dayHalted = false;
+  let triggerState = 0;
+
+  function updateDailyGate(pnlUsdt: number): void {
+    dayPnl += pnlUsdt;
+    const dailyReturnPct = dayStartEquity > 0 ? (dayPnl / dayStartEquity) * 100 : 0;
+    if (options.dailyProfitTargetPct !== undefined && dailyReturnPct >= options.dailyProfitTargetPct) {
+      dayHalted = true;
+    }
+    if (options.dailyLossLimitPct !== undefined && dailyReturnPct <= -Math.abs(options.dailyLossLimitPct)) {
+      dayHalted = true;
+    }
+  }
+
+  function recordTrade(trade: FixedRiskTrade): void {
+    equity += trade.pnlUsdt;
+    trades.push({ ...trade, equityAfterUsdt: equity });
+    updateDailyGate(trade.pnlUsdt);
+  }
+
+  for (let index = 0; index < options.rows.length; index += 1) {
+    const row = options.rows[index];
+    if (options.tradeStartTime !== undefined && row.openTime < options.tradeStartTime) {
+      const warmupSignal = options.range[index]?.signal;
+      triggerState = warmupSignal === "buy" ? 1 : warmupSignal === "sell" ? -1 : triggerState;
+      continue;
+    }
+    const rowDay = dayKey(row.openTime);
+    if (currentDay === undefined) {
+      currentDay = rowDay;
+      dayStartEquity = equity;
+    } else if (rowDay !== currentDay) {
+      const previousRow = options.rows[index - 1];
+      if (position && options.forceFlatAtDayEnd && previousRow) {
+        const preview = closeFixedRiskTrade(options.symbol, position, previousRow, previousRow.close, options.feeRate, "day_end", equity);
+        recordTrade(preview);
+        position = undefined;
+        cooldownUntil = index + (options.cooldownBars ?? 0);
+      }
+      currentDay = rowDay;
+      dayStartEquity = equity;
+      dayPnl = 0;
+      dayHalted = false;
+    }
+    tradingCandles += 1;
+
+    if (position && row.openTime > position.entryRow.openTime) {
+      if (options.maintenanceMarginRate !== undefined) {
+        const marginPct = position.notionalUsdt > 0 ? equity / position.notionalUsdt : 1 / options.maxLeverage;
+        const liquidationPrice =
+          position.direction === "long"
+            ? position.entryRow.close * (1 - marginPct + options.maintenanceMarginRate)
+            : position.entryRow.close * (1 + marginPct - options.maintenanceMarginRate);
+        const liquidated = position.direction === "long" ? row.low <= liquidationPrice : row.high >= liquidationPrice;
+        if (liquidated) {
+          const trade = closeFixedRiskTrade(options.symbol, position, row, liquidationPrice, options.feeRate, "liquidation", equity - position.riskUsdt);
+          recordTrade(trade);
+          position = undefined;
+          cooldownUntil = index + (options.cooldownBars ?? 0);
+          continue;
+        }
+      }
+
+      const hitStop = position.direction === "long" ? row.low <= position.stopPrice : row.high >= position.stopPrice;
+      const hitTakeProfit = position.direction === "long" ? row.high >= position.takeProfitPrice : row.low <= position.takeProfitPrice;
+      if (hitStop || hitTakeProfit) {
+        const exitPrice = hitStop ? position.stopPrice : position.takeProfitPrice;
+        const exitReason: ResearchExitReason = hitStop ? "stop_loss" : "take_profit";
+        const preview = closeFixedRiskTrade(options.symbol, position, row, exitPrice, options.feeRate, exitReason, equity);
+        recordTrade(preview);
+        position = undefined;
+        cooldownUntil = index + (options.cooldownBars ?? 0);
+        continue;
+      }
+    }
+
+    if (position || index < cooldownUntil || dayHalted || index === 0) {
+      continue;
+    }
+    const previousRange = options.range[index - 1];
+    const previousFrama = options.frama[index - 1];
+    if (!previousRange || !previousFrama) {
+      continue;
+    }
+    const touchedLong = row.high >= previousRange.highBand;
+    const touchedShort = row.low <= previousRange.lowBand;
+    if (touchedLong === touchedShort) {
+      continue;
+    }
+    const direction: FlipDirection = touchedLong ? "long" : "short";
+    if ((direction === "long" && triggerState === 1) || (direction === "short" && triggerState === -1)) {
+      continue;
+    }
+    if (!colorAllows(options.colorGate, previousFrama.candleColor, direction)) {
+      continue;
+    }
+
+    const entryPrice = touchedLong ? previousRange.highBand : previousRange.lowBand;
+    const targets = targetsForPreTriggerEntry(entryPrice, direction, previousRange, previousFrama, options);
+    if (!targets) {
+      continue;
+    }
+    const riskUsdt = Math.max(0, equity * options.riskFraction);
+    const riskPerUnit = Math.abs(entryPrice - targets.stop);
+    const riskQuantity = riskUsdt / riskPerUnit;
+    const maxQuantity = (equity * options.maxLeverage) / entryPrice;
+    const quantity = Math.max(0, Math.min(riskQuantity, maxQuantity));
+    if (quantity <= 0) {
+      continue;
+    }
+    triggerState = direction === "long" ? 1 : -1;
+    position = {
+      direction,
+      entryRow: { ...row, close: entryPrice },
+      stopPrice: targets.stop,
+      takeProfitPrice: targets.takeProfit,
+      riskUsdt: riskPerUnit * quantity,
+      notionalUsdt: entryPrice * quantity,
       quantity
     };
   }
