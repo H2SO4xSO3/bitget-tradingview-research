@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { fetchBitgetHistoryCandles } from "./bitgetClient";
+import { fetchBitgetHistoryCandles, fetchBitgetRecentCandles } from "./bitgetClient";
 
 function jsonResponse(payload: unknown) {
   return {
@@ -131,6 +131,41 @@ describe("Bitget candle client", () => {
 
       expect(calls).toBe(2);
       expect(sleeps).toEqual([33]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("fetches recent updating candles from the non-history Bitget endpoint", async () => {
+    const originalFetch = globalThis.fetch;
+    let seenUrl: URL | undefined;
+    globalThis.fetch = (async (input: URL | string) => {
+      seenUrl = input instanceof URL ? input : new URL(String(input));
+      return jsonResponse({
+        code: "00000",
+        msg: "success",
+        data: [
+          ["60000", "101", "102", "100", "101.5", "2", "203"],
+          ["0", "100", "101", "99", "100.5", "1", "100"]
+        ]
+      }) as Response;
+    }) as typeof fetch;
+
+    try {
+      const rows = await fetchBitgetRecentCandles({
+        symbol: "MUUSDT",
+        productType: "USDT-FUTURES",
+        granularity: "1m",
+        limit: 2
+      });
+
+      expect(seenUrl?.pathname).toBe("/api/v2/mix/market/candles");
+      expect(seenUrl?.searchParams.get("symbol")).toBe("MUUSDT");
+      expect(seenUrl?.searchParams.get("productType")).toBe("USDT-FUTURES");
+      expect(seenUrl?.searchParams.get("granularity")).toBe("1m");
+      expect(seenUrl?.searchParams.get("limit")).toBe("2");
+      expect(rows.map((row) => row.openTime)).toEqual([0, 60_000]);
+      expect(rows.at(-1)?.close).toBe(101.5);
     } finally {
       globalThis.fetch = originalFetch;
     }

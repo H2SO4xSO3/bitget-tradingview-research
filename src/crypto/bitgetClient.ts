@@ -6,6 +6,16 @@ interface BitgetCandlesResponse {
   data?: string[][];
 }
 
+interface FetchCandlesRequestOptions {
+  symbol: string;
+  productType: string;
+  granularity: string;
+  limit?: number;
+  maxRetries?: number;
+  retryDelayMs?: number;
+  sleep?: SleepFn;
+}
+
 const BITGET_BASE_URL = "https://api.bitget.com";
 const ONE_MINUTE_MS = 60_000;
 const GRANULARITY_MS: Record<string, number> = {
@@ -61,6 +71,20 @@ async function fetchWithRetry(url: URL, options: { maxRetries: number; retryDela
     }
     await options.sleep(retryDelay(options.retryDelayMs, attempt));
   }
+}
+
+function uniqueSortedRows(rows: ParsedKline[], startTime?: number, endTime?: number): ParsedKline[] {
+  const seen = new Set<number>();
+  return rows
+    .filter((row) => (startTime === undefined || row.openTime >= startTime) && (endTime === undefined || row.openTime <= endTime))
+    .sort((a, b) => a.openTime - b.openTime)
+    .filter((row) => {
+      if (seen.has(row.openTime)) {
+        return false;
+      }
+      seen.add(row.openTime);
+      return row.close > 0 && row.volume >= 0;
+    });
 }
 
 export async function fetchBitgetHistoryCandles(options: {
@@ -120,15 +144,27 @@ export async function fetchBitgetHistoryCandles(options: {
     }
   }
 
-  const seen = new Set<number>();
-  return rows
-    .filter((row) => row.openTime >= options.startTime && row.openTime <= options.endTime)
-    .sort((a, b) => a.openTime - b.openTime)
-    .filter((row) => {
-      if (seen.has(row.openTime)) {
-        return false;
-      }
-      seen.add(row.openTime);
-      return row.close > 0 && row.volume >= 0;
-    });
+  return uniqueSortedRows(rows, options.startTime, options.endTime);
+}
+
+export async function fetchBitgetRecentCandles(options: FetchCandlesRequestOptions): Promise<ParsedKline[]> {
+  const url = new URL("/api/v2/mix/market/candles", BITGET_BASE_URL);
+  url.searchParams.set("symbol", options.symbol);
+  url.searchParams.set("productType", options.productType);
+  url.searchParams.set("granularity", options.granularity);
+  url.searchParams.set("limit", String(options.limit ?? 300));
+
+  const response = await fetchWithRetry(url, {
+    maxRetries: options.maxRetries ?? 5,
+    retryDelayMs: options.retryDelayMs ?? 1_000,
+    sleep: options.sleep ?? sleep
+  });
+  if (!response.ok) {
+    throw new Error(`Bitget recent candles HTTP ${response.status}: ${await response.text()}`);
+  }
+  const payload = (await response.json()) as BitgetCandlesResponse;
+  if (payload.code !== "00000") {
+    throw new Error(`Bitget recent candles error ${payload.code}: ${payload.msg}`);
+  }
+  return uniqueSortedRows((payload.data ?? []).map(parseBitgetCandle));
 }
