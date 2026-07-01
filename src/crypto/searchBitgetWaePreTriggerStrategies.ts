@@ -51,6 +51,17 @@ const startTime = timeFromEnv("BITGET_BACKTEST_START_TIME") ?? endTime - days * 
 const warmupStartTime = startTime - warmupDays * 24 * 60 * 60 * 1000;
 const outputPath = process.env.BITGET_WAE_PRETRIGGER_SEARCH_PATH ?? "data/bitget-muusdt-wae-pretrigger-fixed-risk-search.json";
 
+console.error(
+  JSON.stringify({
+    event: "fetch_start",
+    symbol,
+    granularity,
+    startTime: new Date(warmupStartTime).toISOString(),
+    endTime: new Date(endTime).toISOString(),
+    requestDelayMs
+  })
+);
+
 const rows = await fetchBitgetHistoryCandles({
   symbol,
   productType,
@@ -59,6 +70,7 @@ const rows = await fetchBitgetHistoryCandles({
   endTime,
   requestDelayMs
 });
+console.error(JSON.stringify({ event: "fetch_done", candles: rows.length }));
 
 const frama = computeFramaChannelSeries(rows, { length: 26, bandsDistance: 1.5 });
 const wae = computeWaddahAttarExplosionSeries(rows, {
@@ -204,6 +216,7 @@ for (const samplingPeriod of rangePeriods) {
         }
       }
     }
+    console.error(JSON.stringify({ event: "search_progress", samplingPeriod, rangeMultiplier, tested, bestScore: bestCandidates[0]?.score ?? null }));
   }
 }
 
@@ -247,6 +260,7 @@ const report = {
 
 mkdirSync(path.dirname(outputPath), { recursive: true });
 writeFileSync(outputPath, `${JSON.stringify(report, null, 2)}\n`, "utf8");
+console.error(JSON.stringify({ event: "search_done", outputPath, tested, best: report.best }));
 if (process.env.BITGET_STRATEGY_SEARCH_SILENT !== "1") {
   console.log(JSON.stringify(report, null, 2));
 }
