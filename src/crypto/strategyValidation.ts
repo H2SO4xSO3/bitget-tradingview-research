@@ -92,12 +92,53 @@ export interface WaePreTriggerSearchCandidate {
   summary: FixedRiskBacktestSummary;
 }
 
+export interface ParameterStabilityRow {
+  key: string;
+  samplingPeriod: number;
+  rangeMultiplier: number;
+  waeGate: WaePreTriggerGate;
+  samples: number;
+  positiveReturnSamples: number;
+  targetSamples: number;
+  avgScore: number;
+  avgReturnPct: number;
+  avgMaxDrawdownPct: number;
+  avgProfitFactor: number;
+  avgTrades: number;
+  bestScore: number;
+}
+
 export interface WaePreTriggerSearchResult {
   tested: number;
   best?: WaePreTriggerSearchCandidate;
   bestWithMinTrades?: WaePreTriggerSearchCandidate;
   matches: WaePreTriggerSearchCandidate[];
   top: WaePreTriggerSearchCandidate[];
+  stability: ParameterStabilityRow[];
+}
+
+export interface RollingWalkForwardWindow {
+  index: number;
+  trainStartTime: number;
+  trainEndTime: number;
+  testStartTime: number;
+  testEndTime: number;
+}
+
+export interface TradeDistributionSummary {
+  trades: number;
+  winners: number;
+  losers: number;
+  totalWinUsdt: number;
+  totalLossUsdt: number;
+  netPnlUsdt: number;
+  averageTradePnlUsdt: number;
+  medianTradePnlUsdt: number;
+  top10PctProfitShare: number;
+  top20PctProfitShare: number;
+  largestWinUsdt: number;
+  largestLossUsdt: number;
+  profitConcentrationBlocked: boolean;
 }
 
 export const DEFAULT_WAE_SETTINGS: WaeSettings = {
@@ -146,6 +187,7 @@ export const DEFAULT_WAE_PRETRIGGER_SEARCH_SPACE: WaePreTriggerSearchSpace = {
 };
 
 const SHANGHAI_OFFSET_MS = 8 * 60 * 60 * 1000;
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 function round(value: number, digits = 4): number {
   return Number.isFinite(value) ? Number(value.toFixed(digits)) : value;
@@ -157,6 +199,19 @@ function formatShanghai(isoTime: string): string {
     return isoTime;
   }
   return new Date(timestamp + SHANGHAI_OFFSET_MS).toISOString().slice(0, 16).replace("T", " ");
+}
+
+function average(values: readonly number[]): number {
+  return values.length > 0 ? values.reduce((sum, value) => sum + value, 0) / values.length : 0;
+}
+
+function median(values: readonly number[]): number {
+  if (values.length === 0) {
+    return 0;
+  }
+  const sorted = [...values].sort((left, right) => left - right);
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0 ? (sorted[middle - 1] + sorted[middle]) / 2 : sorted[middle];
 }
 
 function withDefaultConfig(config: WaePreTriggerStrategyConfig): Required<Pick<WaePreTriggerStrategyConfig, "framaLength" | "framaBandsDistance" | "wae">> & WaePreTriggerStrategyConfig {
@@ -207,6 +262,114 @@ export function buildFixedRiskTradeReport(result: FixedRiskBacktestResult): Fixe
     equityAfterUsdt: round(trade.equityAfterUsdt, 6),
     exitReason: trade.exitReason
   }));
+}
+
+export function buildTradeDistributionSummary(result: FixedRiskBacktestResult): TradeDistributionSummary {
+  const pnls = result.trades.map((trade) => trade.pnlUsdt);
+  const winners = pnls.filter((value) => value > 0);
+  const losers = pnls.filter((value) => value < 0);
+  const totalWinUsdt = winners.reduce((sum, value) => sum + value, 0);
+  const totalLossUsdt = losers.reduce((sum, value) => sum + value, 0);
+  const netPnlUsdt = pnls.reduce((sum, value) => sum + value, 0);
+  const sortedProfits = [...winners].sort((left, right) => right - left);
+
+  function topProfitShare(percent: number): number {
+    if (netPnlUsdt <= 0 || sortedProfits.length === 0) {
+      return 0;
+    }
+    const count = Math.max(1, Math.ceil(result.trades.length * percent));
+    const topProfit = sortedProfits.slice(0, count).reduce((sum, value) => sum + value, 0);
+    return round(topProfit / netPnlUsdt, 6);
+  }
+
+  const top10PctProfitShare = topProfitShare(0.1);
+  const top20PctProfitShare = topProfitShare(0.2);
+  return {
+    trades: result.trades.length,
+    winners: winners.length,
+    losers: losers.length,
+    totalWinUsdt: round(totalWinUsdt, 6),
+    totalLossUsdt: round(totalLossUsdt, 6),
+    netPnlUsdt: round(netPnlUsdt, 6),
+    averageTradePnlUsdt: round(average(pnls), 6),
+    medianTradePnlUsdt: round(median(pnls), 6),
+    top10PctProfitShare,
+    top20PctProfitShare,
+    largestWinUsdt: round(winners.length > 0 ? Math.max(...winners) : 0, 6),
+    largestLossUsdt: round(losers.length > 0 ? Math.min(...losers) : 0, 6),
+    profitConcentrationBlocked: netPnlUsdt > 0 && top10PctProfitShare >= 0.8
+  };
+}
+
+export function buildRollingWalkForwardWindows(options: {
+  startTime: number;
+  endTime: number;
+  trainDays: number;
+  testDays: number;
+  stepDays: number;
+}): RollingWalkForwardWindow[] {
+  const trainMs = options.trainDays * DAY_MS;
+  const testMs = options.testDays * DAY_MS;
+  const stepMs = options.stepDays * DAY_MS;
+  const windows: RollingWalkForwardWindow[] = [];
+  if (trainMs <= 0 || testMs <= 0 || stepMs <= 0) {
+    return windows;
+  }
+  for (let trainStartTime = options.startTime, index = 1; ; trainStartTime += stepMs, index += 1) {
+    const trainEndTime = trainStartTime + trainMs;
+    const testStartTime = trainEndTime;
+    const testEndTime = testStartTime + testMs;
+    if (testEndTime > options.endTime) {
+      break;
+    }
+    windows.push({ index, trainStartTime, trainEndTime, testStartTime, testEndTime });
+  }
+  return windows;
+}
+
+export function summarizeParameterStability(
+  candidates: ReadonlyArray<Omit<WaePreTriggerSearchCandidate, "rank"> | WaePreTriggerSearchCandidate>
+): ParameterStabilityRow[] {
+  const groups = new Map<
+    string,
+    {
+      samplingPeriod: number;
+      rangeMultiplier: number;
+      waeGate: WaePreTriggerGate;
+      candidates: Array<Omit<WaePreTriggerSearchCandidate, "rank"> | WaePreTriggerSearchCandidate>;
+    }
+  >();
+  for (const candidate of candidates) {
+    const key = `period=${candidate.config.samplingPeriod} multiplier=${candidate.config.rangeMultiplier} waeGate=${candidate.config.waeGate}`;
+    const group =
+      groups.get(key) ??
+      {
+        samplingPeriod: candidate.config.samplingPeriod,
+        rangeMultiplier: candidate.config.rangeMultiplier,
+        waeGate: candidate.config.waeGate,
+        candidates: []
+      };
+    group.candidates.push(candidate);
+    groups.set(key, group);
+  }
+
+  return Array.from(groups.entries())
+    .map(([key, group]) => ({
+      key,
+      samplingPeriod: group.samplingPeriod,
+      rangeMultiplier: group.rangeMultiplier,
+      waeGate: group.waeGate,
+      samples: group.candidates.length,
+      positiveReturnSamples: group.candidates.filter((candidate) => candidate.summary.returnPct > 0).length,
+      targetSamples: group.candidates.filter((candidate) => candidate.meetsTarget).length,
+      avgScore: round(average(group.candidates.map((candidate) => candidate.score)), 6),
+      avgReturnPct: round(average(group.candidates.map((candidate) => candidate.summary.returnPct)), 6),
+      avgMaxDrawdownPct: round(average(group.candidates.map((candidate) => candidate.summary.maxDrawdownPct)), 6),
+      avgProfitFactor: round(average(group.candidates.map((candidate) => candidate.summary.profitFactor)), 6),
+      avgTrades: round(average(group.candidates.map((candidate) => candidate.summary.trades)), 6),
+      bestScore: round(Math.max(...group.candidates.map((candidate) => candidate.score)), 6)
+    }))
+    .sort((left, right) => right.avgScore - left.avgScore);
 }
 
 export function scoreFixedRiskBacktest(result: FixedRiskBacktestResult): number {
@@ -300,6 +463,7 @@ export function searchWaePreTriggerStrategies(options: {
   const frama = computeFramaChannelSeries(options.rows, { length: 26, bandsDistance: 1.5 });
   const wae = computeWaddahAttarExplosionSeries(options.rows, DEFAULT_WAE_SETTINGS);
   const kept: Array<Omit<WaePreTriggerSearchCandidate, "rank">> = [];
+  const allSummaries: Array<Omit<WaePreTriggerSearchCandidate, "rank">> = [];
   let tested = 0;
 
   function keep(candidate: Omit<WaePreTriggerSearchCandidate, "rank">): void {
@@ -365,6 +529,12 @@ export function searchWaePreTriggerStrategies(options: {
                       config,
                       summary: summarizeFixedRiskBacktest(result)
                     });
+                    allSummaries.push({
+                      score: scoreFixedRiskBacktest(result),
+                      meetsTarget: meetsResearchTarget(result),
+                      config,
+                      summary: summarizeFixedRiskBacktest(result)
+                    });
                   }
                 }
               }
@@ -387,6 +557,7 @@ export function searchWaePreTriggerStrategies(options: {
     best: ranked[0],
     bestWithMinTrades: ranked.find((candidate) => candidate.summary.trades >= 30),
     matches: ranked.filter((candidate) => candidate.meetsTarget),
-    top: ranked
+    top: ranked,
+    stability: summarizeParameterStability(allSummaries)
   };
 }

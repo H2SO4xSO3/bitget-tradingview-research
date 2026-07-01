@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { buildFixedRiskTradeReport, scoreFixedRiskBacktest, summarizeFixedRiskBacktest } from "./strategyValidation";
+import {
+  buildFixedRiskTradeReport,
+  buildRollingWalkForwardWindows,
+  buildTradeDistributionSummary,
+  scoreFixedRiskBacktest,
+  summarizeFixedRiskBacktest,
+  summarizeParameterStability
+} from "./strategyValidation";
 import type { FixedRiskBacktestResult } from "./strategyResearch";
 
 function result(overrides: Partial<FixedRiskBacktestResult>): FixedRiskBacktestResult {
@@ -165,5 +172,104 @@ describe("strategy validation helpers", () => {
     );
 
     expect(broaderSample).toBeGreaterThan(tinySample);
+  });
+
+  it("builds rolling walk-forward windows inside the requested range", () => {
+    const start = Date.UTC(2026, 0, 1);
+    const windows = buildRollingWalkForwardWindows({
+      startTime: start,
+      endTime: start + 100 * 24 * 60 * 60 * 1000,
+      trainDays: 30,
+      testDays: 10,
+      stepDays: 10
+    });
+
+    expect(windows).toHaveLength(7);
+    expect(windows[0]).toEqual({
+        index: 1,
+        trainStartTime: start,
+        trainEndTime: start + 30 * 24 * 60 * 60 * 1000,
+        testStartTime: start + 30 * 24 * 60 * 60 * 1000,
+        testEndTime: start + 40 * 24 * 60 * 60 * 1000
+      });
+    expect(windows.at(-1)).toEqual(
+      expect.objectContaining({
+        index: 7,
+        trainStartTime: start + 60 * 24 * 60 * 60 * 1000,
+        testEndTime: start + 100 * 24 * 60 * 60 * 1000
+      })
+    );
+  });
+
+  it("summarizes whether profit is concentrated in a few trades", () => {
+    const summary = buildTradeDistributionSummary(
+      result({
+        trades: [10, 5, -2, -1].map((pnlUsdt, index) => ({
+          symbol: "MUUSDT",
+          direction: index % 2 === 0 ? "long" : "short",
+          entryTime: `2026-06-24T16:0${index}:00.000Z`,
+          exitTime: `2026-06-24T16:0${index + 1}:00.000Z`,
+          entryPrice: 100,
+          exitPrice: 101,
+          stopPrice: 99,
+          takeProfitPrice: 101,
+          riskUsdt: 2,
+          notionalUsdt: 100,
+          quantity: 1,
+          grossPnlUsdt: pnlUsdt,
+          feeUsdt: 0,
+          pnlUsdt,
+          equityAfterUsdt: 100 + pnlUsdt,
+          exitReason: pnlUsdt > 0 ? "take_profit" : "stop_loss"
+        }))
+      })
+    );
+
+    expect(summary).toEqual({
+      trades: 4,
+      winners: 2,
+      losers: 2,
+      totalWinUsdt: 15,
+      totalLossUsdt: -3,
+      netPnlUsdt: 12,
+      averageTradePnlUsdt: 3,
+      medianTradePnlUsdt: 2,
+      top10PctProfitShare: 0.833333,
+      top20PctProfitShare: 0.833333,
+      largestWinUsdt: 10,
+      largestLossUsdt: -2,
+      profitConcentrationBlocked: true
+    });
+  });
+
+  it("groups parameter stability by Range and WAE gate", () => {
+    const rows = summarizeParameterStability([
+      { score: 10, meetsTarget: false, config: { entryMode: "preTriggerTooltip", samplingPeriod: 50, rangeMultiplier: 2, riskFraction: 0.01, cooldownBars: 0, maxLeverage: 10, colorGate: "none", waeGate: "withDeadZone", minStopPct: 0.004, maxStopPct: 0.04 }, summary: summarizeFixedRiskBacktest(result({ trades: new Array(20).fill(undefined), returnPct: 4, maxDrawdownPct: 2, profitFactor: 1.2 })) },
+      { score: 8, meetsTarget: false, config: { entryMode: "preTriggerTooltip", samplingPeriod: 50, rangeMultiplier: 2, riskFraction: 0.02, cooldownBars: 5, maxLeverage: 10, colorGate: "none", waeGate: "withDeadZone", minStopPct: 0.004, maxStopPct: 0.04 }, summary: summarizeFixedRiskBacktest(result({ trades: new Array(18).fill(undefined), returnPct: 2, maxDrawdownPct: 3, profitFactor: 1.1 })) },
+      { score: -4, meetsTarget: false, config: { entryMode: "preTriggerTooltip", samplingPeriod: 75, rangeMultiplier: 3, riskFraction: 0.02, cooldownBars: 5, maxLeverage: 10, colorGate: "none", waeGate: "withExplosion", minStopPct: 0.004, maxStopPct: 0.04 }, summary: summarizeFixedRiskBacktest(result({ trades: new Array(12).fill(undefined), returnPct: -5, maxDrawdownPct: 7, profitFactor: 0.8 })) }
+    ]);
+
+    expect(rows).toEqual([
+      {
+        key: "period=50 multiplier=2 waeGate=withDeadZone",
+        samplingPeriod: 50,
+        rangeMultiplier: 2,
+        waeGate: "withDeadZone",
+        samples: 2,
+        positiveReturnSamples: 2,
+        targetSamples: 0,
+        avgScore: 9,
+        avgReturnPct: 3,
+        avgMaxDrawdownPct: 2.5,
+        avgProfitFactor: 1.15,
+        avgTrades: 19,
+        bestScore: 10
+      },
+      expect.objectContaining({
+        key: "period=75 multiplier=3 waeGate=withExplosion",
+        avgScore: -4,
+        positiveReturnSamples: 0
+      })
+    ]);
   });
 });

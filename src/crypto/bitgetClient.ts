@@ -35,7 +35,7 @@ type SleepFn = (delayMs: number) => Promise<void>;
 
 function toNumber(value: unknown): number {
   const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : 0;
+  return Number.isFinite(parsed) ? parsed : Number.NaN;
 }
 
 export function parseBitgetCandle(row: string[]): ParsedKline {
@@ -76,14 +76,20 @@ async function fetchWithRetry(url: URL, options: { maxRetries: number; retryDela
 function uniqueSortedRows(rows: ParsedKline[], startTime?: number, endTime?: number): ParsedKline[] {
   const seen = new Set<number>();
   return rows
-    .filter((row) => (startTime === undefined || row.openTime >= startTime) && (endTime === undefined || row.openTime <= endTime))
+    .filter(
+      (row) =>
+        Number.isFinite(row.openTime) &&
+        Number.isFinite(row.closeTime) &&
+        (startTime === undefined || row.openTime >= startTime) &&
+        (endTime === undefined || row.openTime <= endTime)
+    )
     .sort((a, b) => a.openTime - b.openTime)
     .filter((row) => {
       if (seen.has(row.openTime)) {
         return false;
       }
       seen.add(row.openTime);
-      return row.close > 0 && row.volume >= 0;
+      return Number.isFinite(row.close) && Number.isFinite(row.volume) && row.close > 0 && row.volume >= 0;
     });
 }
 

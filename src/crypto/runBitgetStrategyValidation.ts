@@ -1,9 +1,12 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { loadOrFetchCandles } from "./bitgetCandleCache";
 import { fetchBitgetHistoryCandles } from "./bitgetClient";
 import {
   DEFAULT_WAE_PRETRIGGER_CONFIG,
   buildFixedRiskTradeReport,
+  buildRollingWalkForwardWindows,
+  buildTradeDistributionSummary,
   runWaePreTriggerBacktest,
   searchWaePreTriggerStrategies,
   summarizeFixedRiskBacktest
@@ -64,6 +67,23 @@ function shouldRunWalkForward(symbol: string, index: number): boolean {
     .includes(symbol);
 }
 
+function shouldRunRollingWalkForward(symbol: string, index: number): boolean {
+  if (process.env.BITGET_ROLLING_WALK_FORWARD !== "1") {
+    return false;
+  }
+  const setting = process.env.BITGET_ROLLING_WALK_FORWARD_SYMBOLS ?? "first";
+  if (setting === "all") {
+    return true;
+  }
+  if (setting === "first") {
+    return index === 0;
+  }
+  return setting
+    .split(",")
+    .map((value) => value.trim().toUpperCase())
+    .includes(symbol);
+}
+
 const productType = process.env.BITGET_PRODUCT_TYPE ?? "USDT-FUTURES";
 const granularity = process.env.BITGET_GRANULARITY ?? "1m";
 const days = numberFromEnv("BITGET_BACKTEST_DAYS", 180);
@@ -76,11 +96,27 @@ const startTime = timeFromEnv("BITGET_BACKTEST_START_TIME") ?? endTime - days * 
 const warmupStartTime = startTime - warmupDays * DAY_MS;
 const trainDays = numberFromEnv("BITGET_WALK_FORWARD_TRAIN_DAYS", Math.max(1, Math.floor(days / 2)));
 const testDays = numberFromEnv("BITGET_WALK_FORWARD_TEST_DAYS", Math.max(1, days - trainDays));
+const rollingTrainDays = numberFromEnv("BITGET_ROLLING_TRAIN_DAYS", 30);
+const rollingTestDays = numberFromEnv("BITGET_ROLLING_TEST_DAYS", 15);
+const rollingStepDays = numberFromEnv("BITGET_ROLLING_STEP_DAYS", 15);
+const rollingMaxWindows = numberFromEnv("BITGET_ROLLING_MAX_WINDOWS", 4);
 const testStartTime = timeFromEnv("BITGET_WALK_FORWARD_TEST_START_TIME") ?? endTime - testDays * DAY_MS;
 const trainEndTime = timeFromEnv("BITGET_WALK_FORWARD_TRAIN_END_TIME") ?? testStartTime;
 const trainStartTime = timeFromEnv("BITGET_WALK_FORWARD_TRAIN_START_TIME") ?? Math.max(startTime, trainEndTime - trainDays * DAY_MS);
 const outputPath = process.env.BITGET_STRATEGY_VALIDATION_PATH ?? defaultOutputPath();
 const symbols = symbolsFromEnv();
+
+function candleCachePath(symbol: string): string | undefined {
+  if (process.env.BITGET_CANDLE_CACHE_PATH) {
+    return symbols.length === 1 ? process.env.BITGET_CANDLE_CACHE_PATH : process.env.BITGET_CANDLE_CACHE_PATH.replace("{symbol}", symbol);
+  }
+  if (!process.env.BITGET_CANDLE_CACHE_DIR) {
+    return undefined;
+  }
+  const safeStart = new Date(warmupStartTime).toISOString().replace(/[:.]/g, "-");
+  const safeEnd = new Date(endTime).toISOString().replace(/[:.]/g, "-");
+  return path.join(process.env.BITGET_CANDLE_CACHE_DIR, `${symbol}-${granularity}-${safeStart}-${safeEnd}.json`);
+}
 
 const symbolReports = [];
 
@@ -98,15 +134,30 @@ for (const [index, symbol] of symbols.entries()) {
   );
 
   try {
-    const rows = await fetchBitgetHistoryCandles({
-      symbol,
-      productType,
-      granularity,
-      startTime: warmupStartTime,
-      endTime,
-      requestDelayMs
+    const cachePath = candleCachePath(symbol);
+    const candleResult = await loadOrFetchCandles({
+      cachePath,
+      cacheKey: {
+        exchange: "bitget",
+        symbol,
+        productType,
+        granularity,
+        warmupStartTime,
+        endTime
+      },
+      writeCache: process.env.BITGET_WRITE_CANDLE_CACHE !== "0",
+      fetchCandles: () =>
+        fetchBitgetHistoryCandles({
+          symbol,
+          productType,
+          granularity,
+          startTime: warmupStartTime,
+          endTime,
+          requestDelayMs
+        })
     });
-    console.error(JSON.stringify({ event: "fetch_done", symbol, candles: rows.length }));
+    const rows = candleResult.rows;
+    console.error(JSON.stringify({ event: "fetch_done", symbol, source: candleResult.source, candles: rows.length }));
 
     const fixedResult = runWaePreTriggerBacktest({
       symbol,
@@ -119,11 +170,14 @@ for (const [index, symbol] of symbols.entries()) {
 
     const report: Record<string, unknown> = {
       symbol,
+      candleSource: candleResult.source,
+      candleCachePath: cachePath,
       sourceCandles: rows.length,
       tradingCandles: rows.filter((row) => row.openTime >= startTime).length,
       fixedBestConfig: {
         config: DEFAULT_WAE_PRETRIGGER_CONFIG,
         summary: summarizeFixedRiskBacktest(fixedResult),
+        tradeDistribution: buildTradeDistributionSummary(fixedResult),
         daily: fixedResult.daily,
         trades: buildFixedRiskTradeReport(fixedResult)
       }
@@ -152,10 +206,11 @@ for (const [index, symbol] of symbols.entries()) {
         }
       });
       const best = search.best;
+      const validationRows = rows.filter((row) => row.openTime <= endTime);
       const validation = best
         ? runWaePreTriggerBacktest({
             symbol,
-            rows,
+            rows: validationRows,
             config: best.config,
             initialEquityUsdt,
             feeRate,
@@ -170,7 +225,8 @@ for (const [index, symbol] of symbols.entries()) {
           tested: search.tested,
           best: compactCandidate(best),
           bestWithMinTrades: compactCandidate(search.bestWithMinTrades),
-          matches: search.matches
+          matches: search.matches,
+          parameterStability: search.stability.slice(0, 20)
         },
         validation: validation
           ? {
@@ -178,6 +234,7 @@ for (const [index, symbol] of symbols.entries()) {
               endTime: new Date(endTime).toISOString(),
               config: best?.config,
               summary: summarizeFixedRiskBacktest(validation),
+              tradeDistribution: buildTradeDistributionSummary(validation),
               daily: validation.daily,
               trades: buildFixedRiskTradeReport(validation)
             }
@@ -185,6 +242,87 @@ for (const [index, symbol] of symbols.entries()) {
               blocked: "blocked=no_train_candidate"
             },
         topTrainCandidates: search.top
+      };
+    }
+
+    if (shouldRunRollingWalkForward(symbol, index)) {
+      const windows = buildRollingWalkForwardWindows({
+        startTime,
+        endTime,
+        trainDays: rollingTrainDays,
+        testDays: rollingTestDays,
+        stepDays: rollingStepDays
+      }).slice(0, rollingMaxWindows);
+      const rollingReports = [];
+      for (const window of windows) {
+        const trainRows = rows.filter((row) => row.openTime <= window.trainEndTime);
+        console.error(
+          JSON.stringify({
+            event: "rolling_walk_forward_search_start",
+            symbol,
+            window: window.index,
+            trainStartTime: new Date(window.trainStartTime).toISOString(),
+            trainEndTime: new Date(window.trainEndTime).toISOString(),
+            testStartTime: new Date(window.testStartTime).toISOString(),
+            testEndTime: new Date(window.testEndTime).toISOString(),
+            trainCandles: trainRows.length
+          })
+        );
+        const search = searchWaePreTriggerStrategies({
+          symbol,
+          rows: trainRows,
+          initialEquityUsdt,
+          feeRate,
+          tradeStartTime: window.trainStartTime,
+          topLimit: 10,
+          onProgress: (progress) => {
+            console.error(JSON.stringify({ event: "rolling_walk_forward_search_progress", symbol, window: window.index, ...progress }));
+          }
+        });
+        const best = search.best;
+        const validationRows = rows.filter((row) => row.openTime <= window.testEndTime);
+        const validation = best
+          ? runWaePreTriggerBacktest({
+              symbol,
+              rows: validationRows,
+              config: best.config,
+              initialEquityUsdt,
+              feeRate,
+              tradeStartTime: window.testStartTime
+            })
+          : undefined;
+        rollingReports.push({
+          window: {
+            index: window.index,
+            trainStartTime: new Date(window.trainStartTime).toISOString(),
+            trainEndTime: new Date(window.trainEndTime).toISOString(),
+            testStartTime: new Date(window.testStartTime).toISOString(),
+            testEndTime: new Date(window.testEndTime).toISOString()
+          },
+          train: {
+            tested: search.tested,
+            best: compactCandidate(best),
+            bestWithMinTrades: compactCandidate(search.bestWithMinTrades),
+            parameterStability: search.stability.slice(0, 10)
+          },
+          validation: validation
+            ? {
+                summary: summarizeFixedRiskBacktest(validation),
+                tradeDistribution: buildTradeDistributionSummary(validation),
+                daily: validation.daily,
+                trades: buildFixedRiskTradeReport(validation)
+              }
+            : {
+                blocked: "blocked=no_train_candidate"
+              }
+        });
+      }
+      report.rollingWalkForward = {
+        trainDays: rollingTrainDays,
+        testDays: rollingTestDays,
+        stepDays: rollingStepDays,
+        maxWindows: rollingMaxWindows,
+        windows: rollingReports
       };
     }
 

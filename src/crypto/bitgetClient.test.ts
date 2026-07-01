@@ -170,4 +170,29 @@ describe("Bitget candle client", () => {
       globalThis.fetch = originalFetch;
     }
   });
+
+  it("drops malformed candle rows with non-numeric timestamps", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      jsonResponse({
+        code: "00000",
+        msg: "success",
+        data: [
+          ["openTime", "410", "410", "410", "410", "0", "0"],
+          ["60000", "101", "102", "100", "101.5", "2", "203"]
+        ]
+      }) as Response) as typeof fetch;
+
+    try {
+      const rows = await fetchBitgetRecentCandles({
+        symbol: "MUUSDT",
+        productType: "USDT-FUTURES",
+        granularity: "1m"
+      });
+
+      expect(rows.map((row) => row.openTime)).toEqual([60_000]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
 });
