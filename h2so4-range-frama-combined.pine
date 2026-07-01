@@ -80,14 +80,13 @@ for count = halfLen to framaLen - 1
     ll2 := low[count] < ll2 ? low[count] : ll2
 n2 = (hh2 - ll2) / halfLen
 
-float dimen = na
-dimen := n1 > 0 and n2 > 0 and n3 > 0 ? (math.log(n1 + n2) - math.log(n3)) / math.log(2) : nz(dimen[1], 1)
+dimen = n1 > 0 and n2 > 0 and n3 > 0 ? (math.log(n1 + n2) - math.log(n3)) / math.log(2) : 0.0
 alphaRaw = math.exp(-4.6 * (dimen - 1))
 alpha = math.max(math.min(alphaRaw, 1), 0.01)
 
-var float framaRaw = na
-framaRaw := na(framaRaw[1]) ? price : alpha * price + (1 - alpha) * framaRaw[1]
-frama = ta.sma(bar_index < framaLen + 1 ? price : framaRaw, 5)
+var float frama = na
+frama := na(frama) ? price : alpha * price + (1 - alpha) * frama[1]
+frama := ta.sma(bar_index < framaLen + 1 ? price : frama, 5)
 framaUpper = frama + volatility * bandsDistance
 framaLower = frama - volatility * bandsDistance
 
@@ -116,7 +115,7 @@ if breakDown
     framaUpCount := 0
 
 candleColor = colorCandles ? framaStateColor : na
-barcolor(candleColor)
+plotcandle(open, high, low, close, "FRAMA Candles", candleColor, candleColor, bordercolor=candleColor, editable=false)
 
 labelSize = switch labelSizeInput
     "Small" => size.small
