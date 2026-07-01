@@ -1,0 +1,228 @@
+//@version=6
+indicator("H2SO4 Range + FRAMA Combined", overlay=true, max_labels_count=500)
+
+// Range Filter
+src = input.source(close, "Source", group="Range Filter")
+per = input.int(100, minval=1, title="Sampling Period", group="Range Filter")
+mult = input.float(3.0, minval=0.1, title="Range Multiplier", group="Range Filter")
+
+// FRAMA Channel [BigBeluga]
+framaLenInput = input.int(26, title="Length", minval=2, step=2, group="FRAMA Channel")
+bandsDistance = input.float(1.5, "Bands Distance", step=0.01, minval=0.3, group="FRAMA Channel")
+priceVol = input.string("Price", "Signals Data", options=["Price", "Average Volume"], group="FRAMA Channel")
+labelSizeInput = input.string("Small", "Labels Size", options=["Small", "Normal", "Large"], group="FRAMA Channel")
+
+// Display
+showRangeLabels = input.bool(true, "Show Range Buy/Sell", group="Display")
+showLivePreview = input.bool(true, "Show Live Preview Signal", group="Display")
+showFramaChannel = input.bool(true, "Show FRAMA Channel", group="Display")
+showFramaBreakLabels = input.bool(false, "Show FRAMA Break Labels", group="Display")
+colorCandles = input.bool(true, "Color Candles", group="Display")
+
+// Colors
+momentumUpColor = input.color(#27e27b, "Momentum Up", group="Colors", inline="1")
+momentumDownColor = input.color(color.rgb(39, 114, 226), "Down", group="Colors", inline="1")
+neutralColor = input.color(#a2b5ca, "Neutral", group="Colors")
+rangeBuyColor = input.color(color.lime, "Range Buy", group="Colors", inline="2")
+rangeSellColor = input.color(color.red, "Range Sell", group="Colors", inline="2")
+
+// Range Filter calculation
+smoothrng(x, t, m) =>
+    wper = t * 2 - 1
+    avrng = ta.ema(math.abs(x - x[1]), t)
+    ta.ema(avrng, wper) * m
+
+rngfilt(x, r) =>
+    rf = x
+    rf := x > nz(rf[1]) ? x - r < nz(rf[1]) ? nz(rf[1]) : x - r :
+         x + r > nz(rf[1]) ? nz(rf[1]) : x + r
+    rf
+
+smrng = smoothrng(src, per, mult)
+filt = rngfilt(src, smrng)
+hband = filt + smrng
+lband = filt - smrng
+
+var float upward = 0.0
+var float downward = 0.0
+upward := filt > filt[1] ? nz(upward[1]) + 1 : filt < filt[1] ? 0 : nz(upward[1])
+downward := filt < filt[1] ? nz(downward[1]) + 1 : filt > filt[1] ? 0 : nz(downward[1])
+
+longCond = src > filt and upward > 0 and src != src[1]
+shortCond = src < filt and downward > 0 and src != src[1]
+
+var int condIni = 0
+prevCond = nz(condIni[1], 0)
+condIni := longCond ? 1 : shortCond ? -1 : prevCond
+rangeBuy = longCond and prevCond == -1
+rangeSell = shortCond and prevCond == 1
+
+// FRAMA Channel calculation
+framaLen = math.max(2, framaLenInput)
+halfLen = int(framaLen / 2)
+price = hl2
+volatility = ta.sma(high - low, 200)
+pVol = priceVol == "Price" ? close : math.round(ta.sma(volume, 10), 2)
+
+n3 = (ta.highest(high, framaLen) - ta.lowest(low, framaLen)) / framaLen
+
+float hh1 = high
+float ll1 = low
+for count = 0 to halfLen - 1
+    hh1 := high[count] > hh1 ? high[count] : hh1
+    ll1 := low[count] < ll1 ? low[count] : ll1
+n1 = (hh1 - ll1) / halfLen
+
+float hh2 = high[halfLen]
+float ll2 = low[halfLen]
+for count = halfLen to framaLen - 1
+    hh2 := high[count] > hh2 ? high[count] : hh2
+    ll2 := low[count] < ll2 ? low[count] : ll2
+n2 = (hh2 - ll2) / halfLen
+
+float dimen = na
+dimen := n1 > 0 and n2 > 0 and n3 > 0 ? (math.log(n1 + n2) - math.log(n3)) / math.log(2) : nz(dimen[1], 1)
+alphaRaw = math.exp(-4.6 * (dimen - 1))
+alpha = math.max(math.min(alphaRaw, 1), 0.01)
+
+var float framaRaw = na
+framaRaw := na(framaRaw[1]) ? price : alpha * price + (1 - alpha) * framaRaw[1]
+frama = ta.sma(bar_index < framaLen + 1 ? price : framaRaw, 5)
+framaUpper = frama + volatility * bandsDistance
+framaLower = frama - volatility * bandsDistance
+
+breakUp = ta.crossover(hlc3, framaUpper) and barstate.isconfirmed
+breakDown = ta.crossunder(hlc3, framaLower) and barstate.isconfirmed
+
+var color framaStateColor = neutralColor
+var int framaState = 0
+var int framaUpCount = 0
+var int framaDownCount = 0
+
+if ta.cross(close, frama)
+    framaStateColor := neutralColor
+    framaState := 0
+
+if breakUp
+    framaStateColor := momentumUpColor
+    framaState := 1
+    framaUpCount += 1
+    framaDownCount := 0
+
+if breakDown
+    framaStateColor := momentumDownColor
+    framaState := -1
+    framaDownCount += 1
+    framaUpCount := 0
+
+candleColor = colorCandles ? framaStateColor : na
+barcolor(candleColor)
+
+labelSize = switch labelSizeInput
+    "Small" => size.small
+    "Normal" => size.normal
+    "Large" => size.large
+
+if showFramaBreakLabels and breakUp and framaUpCount == 1
+    label.new(bar_index, framaLower, "FRAMA Up\n" + str.tostring(pVol), xloc=xloc.bar_index, yloc=yloc.price,
+         style=label.style_label_up, textcolor=momentumUpColor, color=color.new(color.white, 100), size=labelSize)
+
+if showFramaBreakLabels and breakDown and framaDownCount == 1
+    label.new(bar_index, framaUpper, str.tostring(pVol) + "\nFRAMA Down", xloc=xloc.bar_index, yloc=yloc.price,
+         style=label.style_label_down, textcolor=momentumDownColor, color=color.new(color.white, 100), size=labelSize)
+
+// Tooltip TP/SL helpers
+maxNotNa(a, b) =>
+    na(a) ? b : na(b) ? a : math.max(a, b)
+
+minNotNa(a, b) =>
+    na(a) ? b : na(b) ? a : math.min(a, b)
+
+lineBelow(reference, a, b, fallback) =>
+    aa = not na(a) and a < reference ? a : na
+    bb = not na(b) and b < reference ? b : na
+    c = maxNotNa(aa, bb)
+    na(c) ? fallback : c
+
+lineAbove(reference, a, b, fallback) =>
+    aa = not na(a) and a > reference ? a : na
+    bb = not na(b) and b > reference ? b : na
+    c = minNotNa(aa, bb)
+    na(c) ? fallback : c
+
+longTakeProfit(entryPrice, rangeFilter, rangeHighBand, framaOuter) =>
+    rangeWidth = math.max(0.0, rangeHighBand - rangeFilter)
+    rangeTarget = entryPrice + rangeWidth
+    not na(framaOuter) and framaOuter > rangeTarget ? framaOuter : rangeTarget
+
+shortTakeProfit(entryPrice, rangeFilter, rangeLowBand, framaOuter) =>
+    rangeWidth = math.max(0.0, rangeFilter - rangeLowBand)
+    rangeTarget = entryPrice - rangeWidth
+    not na(framaOuter) and framaOuter < rangeTarget ? framaOuter : rangeTarget
+
+fmt(v) =>
+    str.tostring(v, format.mintick)
+
+framaStateText() =>
+    framaState == 1 ? "FRAMA: Up" : framaState == -1 ? "FRAMA: Down" : "FRAMA: Neutral"
+
+buyTip(entryPrice, preview) =>
+    sl = lineBelow(entryPrice, filt, frama, lband)
+    tp = longTakeProfit(entryPrice, filt, hband, framaUpper)
+    status = preview ? "Live preview: may disappear before candle close" : "Confirmed Range signal"
+    "Buy\n" + status + "\n" + framaStateText() + "\nEntry: " + fmt(entryPrice) + "\nTP: " + fmt(tp) + "\nSL: " + fmt(sl)
+
+sellTip(entryPrice, preview) =>
+    sl = lineAbove(entryPrice, filt, frama, hband)
+    tp = shortTakeProfit(entryPrice, filt, lband, framaLower)
+    status = preview ? "Live preview: may disappear before candle close" : "Confirmed Range signal"
+    "Sell\n" + status + "\n" + framaStateText() + "\nEntry: " + fmt(entryPrice) + "\nTP: " + fmt(tp) + "\nSL: " + fmt(sl)
+
+// Clean Range labels
+if showRangeLabels and rangeBuy and barstate.isconfirmed
+    label.new(bar_index, low, "Buy", xloc=xloc.bar_index, yloc=yloc.belowbar,
+         style=label.style_label_up, color=rangeBuyColor, textcolor=color.black,
+         size=size.small, tooltip=buyTip(close, false))
+
+if showRangeLabels and rangeSell and barstate.isconfirmed
+    label.new(bar_index, high, "Sell", xloc=xloc.bar_index, yloc=yloc.abovebar,
+         style=label.style_label_down, color=rangeSellColor, textcolor=color.white,
+         size=size.small, tooltip=sellTip(close, false))
+
+// Realtime current-bar preview
+var label livePreviewLabel = na
+if barstate.islast
+    if not na(livePreviewLabel)
+        label.delete(livePreviewLabel)
+        livePreviewLabel := na
+
+    liveBuy = showLivePreview and showRangeLabels and not barstate.isconfirmed and rangeBuy
+    liveSell = showLivePreview and showRangeLabels and not barstate.isconfirmed and rangeSell
+
+    if liveBuy
+        livePreviewLabel := label.new(bar_index, low, "Buy", xloc=xloc.bar_index, yloc=yloc.belowbar,
+             style=label.style_label_up, color=rangeBuyColor, textcolor=color.black,
+             size=size.small, tooltip=buyTip(close, true))
+        alert("Range Early Buy | Entry: " + fmt(close), alert.freq_once_per_bar)
+
+    if liveSell
+        livePreviewLabel := label.new(bar_index, high, "Sell", xloc=xloc.bar_index, yloc=yloc.abovebar,
+             style=label.style_label_down, color=rangeSellColor, textcolor=color.white,
+             size=size.small, tooltip=sellTip(close, true))
+        alert("Range Early Sell | Entry: " + fmt(close), alert.freq_once_per_bar)
+
+// Plots
+framaPlotColor = showFramaChannel ? color.new(framaStateColor, framaState == 0 ? 100 : 50) : na
+framaBandColor = showFramaChannel ? color.new(framaStateColor, 20) : na
+framaFillColor = showFramaChannel ? color.new(framaStateColor, colorCandles ? 95 : 85) : na
+
+p0 = plot(frama, "FRAMA", color=framaPlotColor, editable=false)
+p1 = plot(framaUpper, "FRAMA Upper", color=framaBandColor, linewidth=1, editable=false)
+p2 = plot(framaLower, "FRAMA Lower", color=framaBandColor, linewidth=1, editable=false)
+fill(p1, p0, framaUpper, frama, framaFillColor, na, editable=false)
+fill(p0, p2, frama, framaLower, na, framaFillColor, editable=false)
+
+alertcondition(rangeBuy, title="Range Buy", message="Range Buy")
+alertcondition(rangeSell, title="Range Sell", message="Range Sell")
+alertcondition(breakUp, title="FRAMA Break Up", message="FRAMA Break Up")
+alertcondition(breakDown, title="FRAMA Break Down", message="FRAMA Break Down")

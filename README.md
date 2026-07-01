@@ -5,6 +5,7 @@ Standalone research repo for Bitget market data plus TradingView Range Filter / 
 ## Main Surfaces
 
 - `range-pretrigger-clean-labels.pine`: clean Pine indicator labels for TradingView.
+- `h2so4-range-frama-combined.pine`: one-slot TradingView indicator combining clean Range labels with the FRAMA Channel.
 - `src/crypto/tradingViewIndicators.ts`: Range Filter and FRAMA calculation/backtest helpers.
 - `src/crypto/runBitgetTradingViewBacktest.ts`: Bitget 1m indicator backtest runner.
 - `src/crypto/bitgetMarketData.ts`: Bitget market context collection.
