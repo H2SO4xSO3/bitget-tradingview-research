@@ -13,6 +13,7 @@
     "pretrigger-strategy-search": "tsx src/crypto/searchBitgetPreTriggerStrategies.ts",
     "wae-ablation": "tsx src/crypto/runBitgetWaeAblation.ts",
     "wae-pretrigger-strategy-search": "tsx src/crypto/searchBitgetWaePreTriggerStrategies.ts",
+    "strategy-validation": "tsx src/crypto/runBitgetStrategyValidation.ts",
     "strategy-search": "tsx src/crypto/searchBitgetStrategies.ts"
   },
   "devDependencies": {
