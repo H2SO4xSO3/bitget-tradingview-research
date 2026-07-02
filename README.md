@@ -9,6 +9,7 @@ Standalone research repo for Bitget market data plus TradingView Range Filter / 
 - `src/crypto/tradingViewIndicators.ts`: Range Filter and FRAMA calculation/backtest helpers.
 - `src/crypto/runBitgetTradingViewBacktest.ts`: Bitget 1m indicator backtest runner.
 - `src/crypto/runBitgetStrategyValidation.ts`: WAE + Range pre-trigger validation runner with fixed-parameter trade reports and walk-forward splits.
+- `src/crypto/runBitgetTradingViewVolumeObserver.ts`: independent observe-only runner that enriches TradingView candidates with fresh Bitget volume context.
 - `src/crypto/strategyValidation.ts`: reusable fixed-risk summaries, trade reports, scoring, and WAE pre-trigger search helpers.
 - `src/crypto/bitgetMarketData.ts`: Bitget market context collection.
 - `src/crypto/bitgetVolumeResearch.ts`: Bitget volume feature research.
@@ -21,6 +22,7 @@ npm run typecheck
 npm run tradingview-backtest
 npm run bitget-volume-research
 npm run strategy-validation
+npm run tradingview-volume-observe -- --symbols MUUSDT --max-polls 1
 ```
 
 Example:

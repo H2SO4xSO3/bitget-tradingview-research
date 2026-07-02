@@ -9,6 +9,7 @@
     "bitget-volume-research": "tsx src/crypto/runBitgetVolumeResearch.ts",
     "bitget-volume-collect": "tsx src/crypto/runBitgetVolumeCollector.ts",
     "observe-only": "tsx src/crypto/runBitgetObserveOnly.ts",
+    "tradingview-volume-observe": "tsx src/crypto/runBitgetTradingViewVolumeObserver.ts",
     "tradingview-backtest": "tsx src/crypto/runBitgetTradingViewBacktest.ts",
     "pretrigger-strategy-search": "tsx src/crypto/searchBitgetPreTriggerStrategies.ts",
     "wae-ablation": "tsx src/crypto/runBitgetWaeAblation.ts",
